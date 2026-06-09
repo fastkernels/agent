@@ -1,0 +1,77 @@
+\section{Derivation: Self-Inclusion Causes a Scaled Gradient in GRPO}
+\label{app:grpo-bias-derivation}
+
+\paragraph{Setup}
+For a given prompt question, fix a turn group $\mathcal{G}_{t}$ with $|\mathcal{G}_{t}|=N$.
+For each rollout $i\in\mathcal{G}_{t}$, let
+$s_{i,t}\triangleq(h_{i,:t-1},x_{i,t})$ and $y_{i,t}\sim\pi_\theta(\cdot\mid s_{i,t})$,
+where $h_{i,:t-1}$ is all turn history before $t$, $x_{i,t}$ is the prompt with environmental feedback in turn $t$. Let $G_{i,t}$ be the reward-to-go return at turn $t$ and define the in-group mean
+$\bar G_{t}=\frac{1}{N}\sum_{j\in\mathcal{G}_{t}}G_{j,t}$.
+GRPO mean-centering uses $A^{\text{GRPO}}_{i,t}=G_{i,t}-\bar G_{t}$.
+
+For any random variable $Z$ that does \emph{not} depend on the sampled action $y_{i,t}$ (conditional on $s_{i,t}$),
+\begin{equation}
+\mathbb{E}_{y_{i,t}\sim\pi_\theta(\cdot\mid s_{i,t})}
+\big[\nabla_\theta \log \pi_\theta(y_{i,t}\mid s_{i,t})\cdot Z\big]
+= Z\cdot
+\mathbb{E}_{y_{i,t}}\big[\nabla_\theta \log \pi_\theta(y_{i,t}\mid s_{i,t})\big]
+=0,
+\label{eq:score-zero}
+\end{equation}
+where we use $\mathbb{E}_{y}[\nabla_\theta \log \pi_\theta(y\mid s)]
+=\nabla_\theta\!\int \pi_\theta(y\mid s)\,dy=\nabla_\theta 1=0$.
+
+\paragraph{Policy Gradient in GRPO}
+Consider the per-turn GRPO estimator within this group:
+\begin{equation}
+\hat g
+=\frac{1}{N}\sum_{i\in\mathcal{G}_{t}}
+\nabla_\theta \log \pi_\theta(y_{i,t}\mid s_{i,t})
+\left(G_{i,t}-\bar G_{t}\right).
+\label{eq:app:grpo-grad}
+\end{equation}
+Taking expectation and expanding the baseline term,
+\begin{align}
+\mathbb{E}[\hat g]
+&=\frac{1}{N}\sum_{i}\mathbb{E}\!\left[
+\nabla_\theta \log \pi_\theta(y_{i,t}\mid s_{i,t})\,G_{i,t}
+\right]
+-\frac{1}{N}\sum_{i}\mathbb{E}\!\left[
+\nabla_\theta \log \pi_\theta(y_{i,t}\mid s_{i,t})\,\bar G_{t}
+\right] \nonumber\\
+&=\frac{1}{N}\sum_{i}\mathbb{E}\!\left[
+\nabla_\theta \log \pi_\theta(y_{i,t}\mid s_{i,t})\,G_{i,t}
+\right]
+-\frac{1}{N}\sum_{i}\mathbb{E}\!\left[
+\nabla_\theta \log \pi_\theta(y_{i,t}\mid s_{i,t})\,
+\frac{1}{N}\sum_{j}G_{j,t}
+\right].
+\label{eq:app:expand}
+\end{align}
+For $j\neq i$, $G_{j,t}$ is independent of $y_{i,t}$ under independent rollouts, hence we can apply the score-function identity in Eq.~\eqref{eq:score-zero} to obtain
+\[
+\mathbb{E}\!\left[
+\nabla_\theta \log \pi_\theta(y_{i,t}\mid s_{i,t})\,G_{j,t}
+\right]=0\qquad (j\neq i).
+\]
+Therefore only the $j=i$ term remains:
+\begin{align}
+\mathbb{E}[\hat g]
+&=\frac{1}{N}\sum_{i}\mathbb{E}\!\left[
+\nabla_\theta \log \pi_\theta(y_{i,t}\mid s_{i,t})\,G_{i,t}
+\right]
+-\frac{1}{N}\sum_{i}\mathbb{E}\!\left[
+\nabla_\theta \log \pi_\theta(y_{i,t}\mid s_{i,t})\,\frac{1}{N}G_{i,t}
+\right] \nonumber\\
+&=\left(1-\frac{1}{N}\right)\cdot
+\frac{1}{N}\sum_{i}\mathbb{E}\!\left[
+\nabla_\theta \log \pi_\theta(y_{i,t}\mid s_{i,t})\,G_{i,t}
+\right].
+\label{eq:app:scaled}
+\end{align}
+The last term corresponds to the unbiased REINFORCE gradient for this prompt--turn group (up to the outer averaging convention), hence the GRPO mean baseline induces a shrinkage factor $(1-\frac{1}{N})$ due to self-inclusion.
+
+\paragraph{Leave-one-out removes self-inclusion.}
+Using the leave-one-out baseline
+$\bar G^{(-i)}_{t}=\frac{1}{N-1}\sum_{j\neq i}G_{j,t}$,
+the baseline term no longer contains $G_{i,t}$ and is independent of $y_{i,t}$ under independent rollouts. By Eq.~\eqref{eq:score-zero}, the expected contribution of the baseline term becomes zero, yielding an unbiased estimator.

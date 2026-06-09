@@ -1,0 +1,120 @@
+
+\documentclass{article} % For LaTeX2e
+\usepackage[final]{colm2026_conference}
+
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{bbm}
+\usepackage{multirow}
+\usepackage{amsmath}
+% hyperref makes hyperlinks in the resulting PDF.
+% If your build breaks (sometimes temporarily if a hyperlink spans a page)
+% please comment out the following usepackage line and replace
+% \usepackage{icml2026} with \usepackage[nohyperref]{icml2026} above.
+\usepackage{placeins}
+\usepackage{soul}  % for \st (strikethrough)
+\usepackage{amssymb}
+
+% NOTE: including geometry package
+% The geometery package modifies some page properties when used. This can dramatically change the page margins, leading to severe template violation, and potential desk rejection. If the package is required, it can be used with the "pass" flag to skip the default page modifications, as in the following line:
+% \usepackage[pass]{geometry}
+
+\usepackage{lineno}
+
+\newcommand{\env}{\textsc{KernelGym}}
+\newcommand{\kernel}{\textsc{Dr. Kernel}}
+
+\newif\ifshowwl
+% \showwltrue  % 设置为 \showwlfalse 来关闭所有 \wl 内容
+\showwlfalse  % 设置为 \showwlfalse 来关闭所有 \wl 内容
+\newcommand{\wl}[1]{\ifshowwl \textcolor{cyan}{\bf\small [#1 --WL]} \fi}
+
+
+\newcommand{\jh}[1]{\textcolor{magenta}{\bf\small [#1 --JH]}}
+\DeclareRobustCommand{\jhc}[2]{\textcolor{magenta}{\st{#1} #2}}
+
+\definecolor{darkblue}{rgb}{0, 0, 0.5}
+\hypersetup{colorlinks=true, citecolor=darkblue, linkcolor=darkblue, urlcolor=darkblue}
+
+
+\title{\kernel: Reinforcement Learning Done Right for Triton Kernel Generations}
+
+% Authors must not appear in the submitted version. This should be be taken care of automatically as long as you are using the "submission" option for the colm2026_conference package. But it's on the authors to verify. Non-anonymous submissions will be rejected without review.
+
+\author{  
+  Wei Liu$^1$,
+  Jiawei Xu$^3$,
+  Yingru Li$^2$,
+  Longtao Zheng$^4$,
+  Tianjian Li$^2$,
+  Qian Liu$^2$,
+  Junxian He$^1$\\
+  $^1$HKUST $\qquad$ $^2$TikTok $\qquad$ $^3$CUHK(SZ) $\qquad$ $^4$NTU
+}
+
+% The \author macro works with any number of authors. There are two commands
+% used to separate the names and addresses of multiple authors: \And and \AND.
+%
+% Using \And between authors leaves it to \LaTeX{} to determine where to break
+% the lines. Using \AND forces a linebreak at that point. So, if \LaTeX{}
+% puts 3 of 4 authors names on the first line, and the last on the second
+% line, try using \AND instead of \And before the third author name.
+
+\newcommand{\fix}{\marginpar{FIX}}
+\newcommand{\new}{\marginpar{NEW}}
+
+\begin{document}
+
+\ifcolmsubmission
+\linenumbers
+\fi
+
+\maketitle
+
+\begin{abstract}
+High-quality kernel is critical for scalable AI systems, and enabling LLMs to generate such code would advance AI development. However, training LLMs for this task requires sufficient data, a robust environment, and the process is often vulnerable to \emph{reward hacking} and \emph{lazy optimization}. In these cases, models may hack training rewards and prioritize trivial correctness over meaningful speedup. In this paper, we systematically study reinforcement learning (RL) for kernel generation. We first design \textbf{\env{}}, a robust distributed GPU environment that supports reward hacking check, data collection from multi-turn interactions and long-term RL training. Building on \env{}, we investigate effective multi-turn RL methods and identify a biased policy gradient issue caused by self-inclusion in GRPO. To solve this, we propose Turn-level Reinforce-Leave-One-Out (\textbf{TRLOO}) to provide unbiased advantage estimation for multi-turn RL. To alleviate lazy optimization, we incorporate mismatch correction for training stability and introduce Profiling-based Rewards (\textbf{PR}) and Profiling-based Rejection Sampling (\textbf{PRS}) to overcome the issue. The trained model, \kernel-14B, reaches performance competitive with Claude-4.5-Sonnet in Kernelbench. Finally, we study sequential test-time scaling for \kernel-14B. On the KernelBench Level-2 subset, $31.6\%$ of the generated kernels achieve at least a $1.2\times$ speedup over the Torch reference, surpassing Claude-4.5-Sonnet ($26.7\%$) and GPT-5 ($28.6\%$). When selecting the best candidate across all turns, this $1.2\times$ speedup rate further increases to $47.8\%$. All resources, including environment, training code, models, and dataset, are included in \href{https://www.github.com/hkust-nlp/KernelGYM}{github.com/hkust-nlp/KernelGYM}.
+% Finally, we study sequential test-time scaling for \kernel-14B.
+% With sequential test-time scaling on the Level~2 subset (Fast@1.2), using the \emph{final turn} reaches \textbf{31.6} and selecting the \emph{best turn across the interaction history} reaches \textbf{47.8}, compared to \textbf{28.6} (GPT-5) and \textbf{26.7} (Claude-4.5-Sonnet), indicating that test-time scaling can match or exceed frontier models on this subset despite the model-size gap.
+% which even outperforms GPT-5 and Claude-4.5-Sonnet in the Kernelbench level-2 subset. Using the \emph{final turn} yields \textbf{31.6}, while selecting the \emph{best turn across the interaction history} yields \textbf{47.8}, compared to \textbf{28.6} (GPT-5) and \textbf{26.7} (Claude-4.5-Sonnet), showing that test-time scaling can match or exceed frontier models on this subset despite the model-size gap.
+% \jh{i think if we outperform a lot, we should state the number out}.
+% High-quality kernels are critical for scalable AI systems, and enabling LLMs to generate such code would substantially advance AI development. However, training LLMs for kernel generation requires sufficient data and a robust execution environment, and is highly vulnerable to \emph{reward hacking} and \emph{lazy optimization}: models may exploit loopholes in the reward to pass correctness checks or chase trivial improvements, rather than producing kernels with meaningful speedups. In this paper, we systematically study reinforcement learning (RL) for kernel generation. We first introduce \textbf{\env{}}, a robust distributed GPU environment that supports reward-hacking checks, data collection from multi-turn interactions, and long-horizon RL training. Building on \env{}, we investigate effective multi-turn RL and identify a biased policy-gradient issue caused by self-inclusion in GRPO. To address this, we propose Turn-level Reinforce-Leave-One-Out (\textbf{TRLOO}), which provides an unbiased advantage estimator for multi-turn RL. To mitigate lazy optimization, we incorporate mismatch correction for training stability and introduce Profiling-based Rewards (\textbf{PR}) and Profiling-based Rejection Sampling (\textbf{PRS}) to steer learning toward \emph{measured} speedups. The resulting model, \kernel-14B, achieves performance competitive with frontier models on KernelBench, and with sequential test-time scaling it further improves—surpassing GPT-5 and Claude-4.5-Sonnet on the Level~2 Fast@1.2 metric—while also narrowing the gap on the hardest Level~3 subset despite a substantial model-size disparity.
+\end{abstract}
+\vspace{-0.8cm}
+\begin{figure}[htbp]
+    \centering
+\includegraphics[width=0.8\textwidth]{figures/frontier_bar.pdf}
+    \vspace{-10pt}
+    \caption{
+    Rate of generated kernels achieving at least a $1.2\times$ speedup over the Torch reference on KernelBench across three level subsets. \kernel-14B is competitive with Claude-4.5-Sonnet and GPT-5, and applying sequential test-time scaling further improves \kernel-14B, surpassing both models on two of the three subsets.
+    }
+    \label{fig:frontier}
+\end{figure}
+\input{sections/intro}
+\input{sections/pitfalls}
+\input{sections/kernelgym}
+\input{sections/multiturnrl}
+\input{sections/tradeoff}
+\input{sections/experiments}
+\input{sections/conclusion}
+\input{sections/futureworks}
+
+\bibliography{colm2026_conference}
+\bibliographystyle{colm2026_conference}
+
+\newpage
+\appendix
+\input{appendices/bias}
+\input{appendices/training_dynamics}
+\input{appendices/model_behaviors}
+\input{appendices/PRS_ablations}
+\input{appendices/cases}
+\input{appendices/prompt_template}
+% \section{Appendix}
+% You may include other additional sections here.
+
+\end{document}

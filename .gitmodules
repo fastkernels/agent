@@ -1,0 +1,9 @@
+[submodule "reference/cuco-code"]
+	path = reference/papers/cuco-code
+	url = git@github.com:UT-InfraAI/cuco.git
+[submodule "reference/cudaforge-code"]
+	path = reference/papers/cudaforge-code
+	url = git@github.com:OptimAI-Lab/CudaForge.git
+[submodule "reference/KernelGYM"]
+	path = reference/papers/KernelGYM
+	url = git@github.com:hkust-nlp/KernelGYM.git

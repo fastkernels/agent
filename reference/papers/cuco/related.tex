@@ -1,0 +1,93 @@
+% \section{Related Work}
+
+% \begin{table}[t]
+% \centering
+% \scriptsize
+% \caption{\small{Comparison of agentic CUDA kernel generation systems.}}
+% \label{tab:agentic-cuda-comparison}
+% \vspace{-5pt}
+% \begin{tabular}{lcccc}
+% \toprule
+% \textbf{System} & \textbf{Multi-GPU} & \textbf{Comm Support} & \textbf{No Training} & \textbf{Fusion} \\
+% \midrule
+% CUDAForge~\cite{cudaforge}      & \xmark & \xmark & \cmark & \xmark \\
+% STARK~\cite{dong2025starkstrategicteamagents}          & \xmark & \xmark & \cmark & \xmark \\
+% Kevin-32B~\cite{kevin}      & \xmark & \xmark & \xmark & \xmark \\
+% KernelFalcon~\cite{kernelfalcon}   & \xmark & \xmark & \cmark & \xmark \\
+% \textbf{\cufuse{}}         & \cmark & \cmark & \cmark & \cmark \\
+% \bottomrule
+% \end{tabular}
+% \vspace{-15pt}
+% \end{table}
+
+
+
+% We begin with a brief overview of CUDA kernel fusion and compute-communication co-design, and the challenges of automating kernel generation.
+
+% \subsection{CUDA Kernel Fusion}
+% Kernel fusion has long been a key lever for GPU efficiency: collapsing operator chains into a single kernel reduces global-memory traffic and amortizes kernel-launch overheads~\cite{9741270, wang_fusion}. Modern ML stacks rely on fusion across production frameworks and compiler systems~\cite{pytorch2, snider2023operatorfusionxlaanalysis, rammer, autotvm, triton}, and successes like FlashAttention~\cite{10.5555/3600270.3601459, dao2023flashattention2fasterattentionbetter, shah2024flashattention} illustrate the payoff of pushing fusion through algorithm-hardware co-design. Despite significant gains due to fusion, communication is still kept separate from the computation code, and even when computation and communication are being overlapped, they are typically issued in separate kernels or streams to enable overlap~\cite{coconet, hong2025flashoverlap, wang2024dominoeliminatingcommunicationllm, 9499904, megatron-lm}.
+% Recent systems have made significant progress in this direction. FLUX~\cite{chang2024flux} fuses GEMM with AllGather/ReduceScatter by tiling communication at the GEMM tile boundary, and USP~\cite{fang2024usp} provides a unified sequence-parallelism approach that overlaps attention computation with KV communication. These systems achieve impressive results but require manual implementation of the fusion strategy for each target workload and hardware configuration.
+% The advent of device-aided communication (\eg NVSHMEM~\cite{nvshmem}, NCCL Device-Side Launch~\cite{nccl_deviceapi}) challenges this status quo, offering the opportunity to interleave communication directly within the compute kernel. In this work, we precisely tackle the challenge of fusing communication with computation at the GPU kernel level to unlock distributed performance.
+
+% \subsection{Device-initiated Communication}
+% Device-initiated communication primitives enable GPUs to drive multi-device data transfers directly from kernel code, eliminating CPU involvement and the associated host-device synchronization overhead. Two primary methodologies have recently emerged to support this paradigm. First, NVSHMEM \cite{nvshmem} introduced a Partitioned Global Address Space (PGAS) and device-callable put/get operations, facilitating fine-grained, P2P communication. Second, the NCCL Device APIs~\cite{nccl_deviceapi} extended this capability by allowing collective operations to be invoked directly within CUDA kernels.
+
+% \noindent\textbf{NCCL device-initiated API.}
+% Figure~\ref{fig:nccl_demo} illustrates NCCL's device-initiated API through an AllToAll kernel. Unlike host-driven collectives, where the CPU triggers communication only after kernel completion, device-initiated collectives let threads drive communication directly. The kernel showcases NCCL's two core device-side abstractions: GPU-Initiated Networking (GIN), which issues RDMA-style puts to remote peers across nodes (lines 31, 36), and Load/Store Accessible (LSA), which accesses intra-node peer memory via direct loads and stores (lines 46–47). Crucially, synchronization is no longer a coarse host barrier---the device API provides fine-grained, programmer-controlled primitives scoped at multiple granularities (lines 12–15), while \texttt{gin.waitSignal} (line 53) provides an explicit mechanism for detecting when remote data has arrived, eliminating the need for custom signaling infrastructure. This fine-grained control is what enables true compute–communication fusion and remains fundamentally out of reach for host-driven APIs. Together, these primitives expose the degrees of freedom that \cufuse{} formalizes as the fusion directive.
+
+
+% These advances mark a natural evolution in GPU systems development. Historically, compute and communication libraries evolved independently---compute kernels focused on throughput and resource utilization, while networking libraries optimized for interconnect efficiency. Libraries such as DeepEP~\cite{deepep2025}, FLUX~\cite{chang2024flux}, and TokenWeave~\cite{gond2025tokenweave} have demonstrated the substantial gains possible when the two are co-designed. However, crafting such kernels requires deep expertise in both domains, and each implementation is necessarily tuned for a specific hardware configuration. \cufuse{} complements these efforts by automating the co-design process: rather than replacing expert-crafted solutions, it makes the benefits of compute--communication co-design accessible to teams that lack the resources for manual kernel engineering.
+
+
+% % More recent efforts, including~\cite{deepep, tokenweave, flux}, show that fully fused compute-communication kernels can deliver substantial gains, and~\cite{triton-distributed} integrates NVSHMEM primitives directly into compiler IR. 
+% % Despite these developments, existing systems still rely on manually crafted fusion patterns~\cite{breaking_abstraction} and
+% % Early systems such as CoCoNet~\cite{coconet_asplos2022} compensated for the lack of native device-side collectives by combining NCCL host calls with custom CUDA kernels. 
+% \subsection{Agents for Kernel Generation}
+% Before introducing \cufuse{}, we briefly introduce existing agentic approaches to perform GPU kernel generation, how they fall short when used for benchmark-style workloads. Existing works~\cite{concur,cudaforge,evoengineer} combine an LLM-based proposer with structured feedback---compilation results, unit tests, and profiling signals---to iteratively refine kernels. While effective on benchmark-style workloads, this approach has critical limitations when extended to distributed GPU settings.
+% (1) \emph{Lack of collective communication support.} Existing agents are built around single‑device optimization: they generate kernels for one GPU, evaluate correctness and performance in isolation, and lack representation of cross‑device coordination or collective primitives~\cite{concur,cudaforge,evoengineer}. This makes them unsuitable for distributed settings, where computation and inter‑GPU communication must be tightly interleaved to scale~\cite{megatron-lm}.
+% (2) \emph{Dependence on training.} Some systems~\cite{kevin} require fine‑tuning on domain‑specific kernel corpora~\cite{ouyang2025kernelbenchllmswriteefficient, liao2026kernelevolvescalingagentickernel,li2026cudal1improvingcudaoptimization}, incurring substantial upfront cost and making them brittle to API changes across GPU generations. This limits their usefulness in rapidly evolving hardware ecosystems where new communication primitives appear frequently.
+% (3) \emph{Premature code generation without decomposition.} Most critically, existing agents attempt to translate a task specification directly into kernel code, relying on iterative correction to fix errors~\cite{lange2025robustagenticcudakernel, wei2025astramultiagentgpukernel, ouyang2025kernelbenchllmswriteefficient}. This works for single‑GPU operators such as GEMM, where the search space is well‑structured and feedback is unambiguous. For compute‑communication kernels, however, jumping straight to code is fatal: the agent must first resolve high‑level coordination decisions—how to partition SMs between compute and communication, the tile granularity for inter‑GPU transfers, and the choice of collective primitive and topology—before any kernel can be meaningfully evaluated. Agents that skip this decomposition typically serialize compute and communication, misallocate resources, or issue collectives at inappropriate granularities, leading to correctness failures that cannot be recovered through local refinement. Table~\ref{tab:agentic-cuda-comparison} summarizes the limitation of existing frameworks.
+
+% These characteristics call for an agentic framework that embeds multi‑GPU semantics into the search space, leverages structured signals about communication behavior, and steers the agent toward designs that remain robust across hardware topologies and workloads. Existing approaches still fall short, as they lack fusion strategies that generalize, scale, and integrate cleanly with modern distributed ML systems.
+
+% We note that \cufuse{} occupies a different level of the stack than communication libraries such as DeepEP~\cite{deepep2025}: the latter provides optimized communication primitives, while \cufuse{} automates the higher-level co-design decisions---overlap strategy, stream topology, work partitioning---that determine how those primitives are composed with computation. The two approaches are complementary.
+\vspace{-15pt}
+\section{Related Work}
+\vspace{-3pt}
+\begin{table}[t]
+\centering
+\scriptsize
+\caption{Comparison of agentic CUDA kernel generation systems.}
+\label{tab:agentic-cuda-comparison}
+\vspace{-5pt}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{System} & \textbf{Multi-GPU} & \textbf{Comm Support} & \textbf{No Training} & \textbf{Device-Init} \\
+\midrule
+CUDAForge~\cite{cudaforge}      & \xmark & \xmark & \cmark & \xmark \\
+STARK~\cite{dong2025starkstrategicteamagents}          & \xmark & \xmark & \cmark & \xmark \\
+Kevin-32B~\cite{kevin}      & \xmark & \xmark & \xmark & \xmark \\
+KernelFalcon~\cite{kernelfalcon}   & \xmark & \xmark & \cmark & \xmark \\
+\textbf{\cufuse{}}         & \cmark & \cmark & \cmark & \cmark \\
+\bottomrule
+\end{tabular}
+\vspace{-15pt}
+\end{table}
+
+
+\vspace{-8pt}
+\subsection{Device-Initiated Communication}
+\vspace{-8pt}
+Traditional distributed GPU programs use \emph{host-driven} communication: the CPU launches collectives between compute kernels, limiting overlap to coarse-grained stream pipelining~\cite{megatron-lm, coconet}. Recent \emph{device-initiated} interfaces---NVSHMEM~\cite{nvshmem} and NCCL's device-side APIs~\cite{nccl_deviceapi}---allow GPU threads to issue communication from within a kernel. NCCL exposes two backends: GPU-Initiated Networking (GIN) for RDMA-style inter-node transfers and Load/Store Accessible (LSA) for direct peer-memory access over NVLink (Appendix~\ref{sec:nccl_demo}). This moves communication \emph{inside} the kernel boundary, enabling fine-grained interleaving at the tile or warp level.
+
+\vspace{-3pt}
+\subsection{Compute-Communication Co-design}
+\vspace{-3pt}
+Device-initiated APIs open a design space---backend selection, synchronization scope, issuer granularity, transfer placement---that determines how compute and communication overlap. Industrial stacks~\cite{deepep2025, chang2024flux, gond2025tokenweave, licker2025rdmap2p} navigate this space manually, achieving large speedups but requiring deep expertise and remaining tied to specific topologies. This is distinct from compute-only fusion (e.g., FlashAttention~\cite{dao2023flashattention2fasterattentionbetter}), which reduces memory traffic but keeps communication outside the kernel. \cufuse{} automates the device-initiated co-design process.
+
+\vspace{-8pt}
+\subsection{Agents for Kernel Generation}
+\vspace{-3pt}
+Recent agentic approaches~\cite{concur,cudaforge,evoengineer} combine an LLM with structured feedback to iteratively refine kernels, but fall short for distributed settings (Table~\ref{tab:agentic-cuda-comparison}): they lack collective primitives~\cite{cudaforge,evoengineer}, some require costly fine-tuning~\cite{kevin, ouyang2025kernelbenchllmswriteefficient} that is brittle to API changes, and they attempt direct code generation without decomposition~\cite{lange2025robustagenticcudakernel}---causing unrecoverable failures on complex compute-communication kernels where high-level coordination decisions (topology, primitive choice, synchronization granularity) must be resolved first.
+
+\cufuse{} addresses these limitations by embedding multi-GPU semantics into a structured search space and employing a fast-path/slow-path decomposition.

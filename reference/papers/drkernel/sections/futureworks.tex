@@ -1,0 +1,11 @@
+\section{Limitations and Future Work}
+While our approach demonstrates progress in RL-based training for Triton kernel generation, we acknowledge several areas that warrant further investigation.
+
+\paragraph{Data Scaling and Pre-training}
+From a data perspective, resource constraints limited our supervised fine-tuning (SFT) phase to 8,000 cold-start samples. Given the relative scarcity of high-quality kernel programming data in the pre-training corpora of current Large Language Models (LLMs), our results suggest that the "data floor" for this domain is quite high. Future work could involve larger-scale data collection to facilitate domain-specific pre-training or continual pre-training (middle-training), which would also provide a more robust foundation for subsequent RL optimization.
+
+\paragraph{Model Capacity}
+Our observations with \kernel-8B and \kernel-14B confirm that larger models possess a superior capacity for kernel generation. This scaling effect is particularly critical in Reinforcement Learning, where the model must rely on its own generations to explore the solution space and update its policy. We expect that migrating these methods to even larger parameter scales will accelerate the development.
+
+\paragraph{Path Toward Production-Ready Automation}
+Although our methods achieve performance improvements that rival or exceed frontier models, the field remains in an exploratory stage. While current models can generate high-quality code snippets, they are not yet capable of fully autonomous, end-to-end kernel generation for production environments. We hope that our contributions, specifically the \env{} environment and the \kernel{} training framework, serve as a catalyst for future research.

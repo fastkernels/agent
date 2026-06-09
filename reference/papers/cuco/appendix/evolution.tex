@@ -1,0 +1,381 @@
+
+
+\section{NCCL Device-Initiated API Example}\label{sec:nccl_demo}
+
+\begin{figure}[h]
+  \centering
+  \resizebox{0.7\linewidth}{!}{
+  \lstinputlisting[style=customc2]{codes/nccl.tex}}
+  \caption{
+    \small{\textbf{NCCL device-initiated API:} All-to-All CUDA kernel using the GPU-Initiated Networking (GIN) and Load/Store Accessible (LSA) API. GIN issues RDMA-style puts to remote peers (lines 31, 36); LSA accesses intra-node peer memory via direct loads and stores (lines 46--47). Fine-grained synchronization primitives (lines 12--15) and \texttt{gin.waitSignal} (line 53) enable compute--communication fusion that is out of reach for host-driven APIs.}
+  }
+  \label{fig:nccl_demo}
+\end{figure}
+
+\section{Design Space Details}\label{sec:design_space_details}
+
+This section provides a full semantic breakdown of the eight configuration dimensions that constitute the optimization space $\mathcal{C} = \mathcal{B} \times \mathcal{M} \times \mathcal{P} \times \mathcal{S} \times \mathcal{I} \times \mathcal{G} \times \mathcal{O} \times \mathcal{K}$. The dimensions fall into two categories: \emph{concrete API dimensions} that map directly to fixed NCCL device-API identifiers and must be instantiated exactly, and \emph{intent-based dimensions} that express high-level optimization objectives the agent realizes freely during code generation.
+
+\paragraph{Concrete API Dimensions.}
+
+\begin{itemize}[leftmargin=1.4em,itemsep=2pt,topsep=2pt]
+
+\item \textbf{Backend ($\mathcal{B}$): GIN $|$ LSA $|$ Hybrid.}
+The backend determines the transport mechanism for device-initiated communication. \textbf{GIN} (GPU-Initiated Networking) provides one-sided RDMA put semantics: a thread group issues \texttt{ncclGinPut} to transfer data to a remote rank's registered window, then \texttt{ncclGinFlush} to guarantee delivery, and \texttt{ncclGinWaitSignal} to poll for a remote completion notification. GIN works across both intra-node (NVLink) and inter-node (InfiniBand/RoCE) links, making it the default choice for multi-node deployments. \textbf{LSA} (Load/Store Accessible) provides direct peer memory access within an NVLink domain: threads read from and write to remote buffers via standard load/store instructions resolved through \texttt{ncclGetLsaPointer}, synchronized by \texttt{ncclLsaBarrierSession}. LSA avoids network-stack overhead but is restricted to intra-node topologies. \textbf{Hybrid} combines both: LSA for intra-node transfers and GIN for inter-node transfers within the same kernel, requiring careful scope partitioning to avoid cross-backend interference.
+
+\item \textbf{Completion Mechanism ($\mathcal{M}$): Barrier $|$ Signal $|$ SignalShadow $|$ Counter.}
+The completion mechanism dictates how a rank detects that a remote transfer has finished. \textbf{Barrier} imposes a global rendezvous: all ranks in the synchronization scope must reach the barrier before any can proceed, guaranteeing collective completion at the cost of serializing all participants. \textbf{Signal} enables point-to-point notification: the sender increments the receiver's signal counter upon completion, and the receiver polls via \texttt{ncclGinWaitSignal}, allowing fine-grained overlap but introducing race-condition risks if signal ordering is not carefully managed. \textbf{SignalShadow} extends Signal by maintaining a shadow copy of the signal counter in local memory, reducing remote polling traffic at the cost of additional bookkeeping. \textbf{Counter} uses device-side atomic counters (\texttt{atomicAdd}/\texttt{atomicLoad}) for intra-kernel synchronization between communication and compute thread groups, enabling per-tile pipelining within a cooperative grid.
+
+\item \textbf{Issuer Granularity ($\mathcal{I}$): Thread $|$ Warp $|$ WarpSpan $|$ Tile$\langle$N$\rangle$ $|$ CTA.}
+The issuer granularity determines which thread group collectively participates in a single communication operation. \textbf{Thread}-level issuance offers maximum flexibility but incurs high per-operation overhead and risks warp divergence. \textbf{Warp}-level issuance amortizes setup across 32 threads and aligns with the GPU's native scheduling unit. \textbf{WarpSpan} allows a contiguous span of warps to issue cooperatively, useful for large transfers that exceed a single warp's bandwidth. \textbf{Tile$\langle$N$\rangle$} groups $N$ warps into a tile-sized unit matched to the compute tile dimensions, aligning communication granularity with compute structure. \textbf{CTA}-level issuance is the most conservative: the entire thread block participates, minimizing divergence risk but limiting overlap opportunities within the block.
+
+\item \textbf{Memory Ordering ($\mathcal{O}$): Relaxed $|$ Acquire $|$ Release $|$ AcqRel.}
+Memory ordering controls the visibility guarantees of device-initiated transfers. \textbf{Relaxed} ordering imposes no fence, allowing maximum reordering by the hardware for throughput but requiring the programmer (or agent) to ensure correctness through other means. \textbf{Release} ordering guarantees that all prior writes are visible before the transfer is signaled as complete---essential when a sender must ensure data integrity before notifying the receiver. \textbf{Acquire} ordering guarantees that subsequent reads observe all writes that preceded the matching release---essential on the receiver side after polling a signal. \textbf{AcqRel} combines both, providing a full fence suitable for bidirectional exchanges but at maximum ordering cost.
+
+\item \textbf{Context Multiplicity ($\mathcal{K}$): 1 $|$ 2 $|$ N.}
+Context multiplicity controls the number of concurrent communication contexts (NCCL device communicator instances) available to the kernel. A single context ($K{=}1$) serializes all transfers through one communicator, simplifying synchronization but limiting bandwidth utilization. Two contexts ($K{=}2$) enable double-buffering: one context transfers the current chunk while the other prepares the next, hiding transfer latency behind data preparation. $N$ contexts generalize this to deeper pipelines, useful for ring or mesh topologies where multiple concurrent peer transfers can saturate available network bandwidth.
+
+\end{itemize}
+
+\paragraph{Intent-Based Dimensions.}
+
+\begin{itemize}[leftmargin=1.4em,itemsep=2pt,topsep=2pt]
+
+\item \textbf{Communication Placement ($\mathcal{P}$): Deferred $|$ Tile-fused $|$ Tile-pipelined $|$ Stream-split.}
+Placement determines where communication is positioned relative to compute. \textbf{Deferred} placement executes all communication after compute completes, the simplest and safest option but offering no overlap. \textbf{Tile-fused} interleaves communication with compute at the tile level within a single persistent kernel using warp specialization: dedicated communication warps issue transfers while compute warps process tiles, maximizing overlap for iterative exchange patterns (e.g., ring attention). \textbf{Tile-pipelined} issues communication for the next tile while compute processes the current tile, requiring double-buffering but enabling overlap without warp specialization. \textbf{Stream-split} separates communication onto a high-priority CUDA stream while compute runs on the default stream, relying on CUDA's multi-stream execution model for overlap; this is suited to bulk transfers between large compute phases where kernel-level fusion would be overly complex.
+
+\item \textbf{Synchronization Scope ($\mathcal{S}$): Local $|$ World $|$ Rail $|$ Hierarchical.}
+The synchronization scope defines the set of ranks that must participate in collective synchronization. \textbf{Local} scope restricts synchronization to ranks within the same node (NVLink domain), minimizing latency for intra-node operations. \textbf{World} scope includes all ranks across all nodes, necessary for global collectives but imposing cross-network synchronization costs. \textbf{Rail} scope synchronizes ranks that share the same GPU index across nodes (rail-optimized topology), exploiting the fact that NVSwitch fabrics provide uniform bandwidth within a rail. \textbf{Hierarchical} scope composes local and world synchronization in phases---first synchronizing within each node, then across nodes---reducing global synchronization frequency at the cost of additional implementation complexity.
+
+\item \textbf{Transfer Granularity ($\mathcal{G}$): Per-peer $|$ Per-tile $|$ Per-chunk.}
+Transfer granularity controls how data is partitioned for communication. \textbf{Per-peer} issues a single transfer per destination rank, minimizing operation count but preventing fine-grained overlap. \textbf{Per-tile} aligns transfer boundaries with compute tile boundaries, enabling per-tile pipelining where each tile can be processed as soon as its data arrives. \textbf{Per-chunk} subdivides each peer's data into smaller chunks, offering the finest-grained overlap at the cost of higher per-operation synchronization overhead.
+
+\end{itemize}
+
+\paragraph{Expert System Mapping.}
+Table~\ref{tab:design_space_coverage} in the main text maps expert-crafted systems onto $\mathcal{C}$ by semantic equivalence. DeepEP's NVLink path uses direct peer memory stores with CTA-level barrier synchronization (LSA, Barrier, Deferred, Local, CTA, Per-peer, Release), while its InfiniBand path uses custom RDMA one-sided puts with signal-based completion (GIN, Signal, Deferred, World, CTA, Per-peer, Acquire, 1 context). FLUX employs persistent tile-fused kernels with warp-level LSA stores and bidirectional ordering (LSA, Barrier, Tile-fused, Local, Warp, Per-tile, AcqRel). These mappings demonstrate that the eight dimensions of $\mathcal{C}$ are sufficient to characterize the design decisions of state-of-the-art expert implementations, while exposing a much larger space of unexplored configurations that \cufuse{} can navigate automatically.
+
+
+\section{Agent Context Details}\label{sec:agent_context}
+
+The agent context is a structured prompt component assembled at runtime and injected into every agent invocation. It is \emph{conditioned on the selected backend} $\mathcal{B}$: a GIN run receives only GIN-specific documentation, headers, correctness rules, and reference code, while an LSA run receives the corresponding LSA-specific material. Shared components---the optimization strategy framework, evolve-block constraints, and hardware context---are included in both. This backend-conditioned assembly avoids polluting the agent's context window with irrelevant API surface, which we found reduced hallucinated cross-API calls in early experiments.
+
+\paragraph{API Documentation.}
+The context includes interface specifications following a fixed schema of function signatures, semantic preconditions, valid/invalid parameter combinations, and annotated usage examples. For a GIN run, this comprises the \emph{GIN interface} (one-sided RDMA put semantics, flush ordering, completion signaling), the \emph{team specification} (rank organization into world, local, and rail scopes, grounding $\mathcal{S}$), and the \emph{thread-group specification} (thread-level participation granularity, grounding $\mathcal{I}$). For an LSA run, the GIN interface is replaced by the \emph{LSA interface} (direct load/store access, memory barriers, intra-node peer connectivity). These establish the semantic contracts of the design space---details that cannot be inferred from general CUDA or host-driven NCCL experience alone. In addition, the context supplies the raw NCCL device-API C++ headers for the selected backend (e.g., \texttt{gin.h}, \texttt{core.h}, \texttt{coop.h} for GIN) and a complete, working reference kernel that demonstrates the target communication pattern end-to-end, giving the agent both a compilable type reference and a concrete pattern to generalize from rather than invent from scratch. Table~\ref{tab:lsa-example-appendix} shows the LSA interface specification as a representative example.
+
+\begin{table}[h]
+\centering
+\scriptsize
+\caption{Sample knowledge base structure as presented within the LSA interface.}
+\label{tab:lsa-example-appendix}
+\begin{tabular}{p{0.15\columnwidth} p{0.75\columnwidth}}
+\toprule
+\textbf{Field} & \textbf{Content} \\
+\midrule
+Purpose & Device-side peer memory access and barrier synchronization within local GPU teams via direct load/store. \\
+Core API & \texttt{ncclLsaBarrierSession} (provides synchronization), \texttt{ncclGetLsaPointer} (team-indexed access), \texttt{ncclGetLocalPointer} (local access), ... \\
+Sync Scope & \texttt{ncclTeamLsa} (intra-node local team), \texttt{ncclTeamWorld} (all ranks); tighter scope reduces overhead but limits overlap potential. \\
+Invariants & Barrier index must be unique per CTA (\texttt{blockIdx.x}), ... \\
+Canonical Pattern & Instantiate \texttt{ncclLsaBarrierSession} with \texttt{blockIdx.x}; perform memory operations; call \texttt{sync(ncclCoopCta(), memory\_order\_release)}; access peers via \texttt{ncclGetLsaPointer}. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Strategy Knowledge.}
+A shared optimization strategy framework spans both backends, guiding the agent to apply the right level of fusion for each workload. It describes three principal strategies:
+\begin{itemize}[leftmargin=1.4em,itemsep=1pt,topsep=2pt]
+\item \emph{Kernel-level fusion} --- persistent kernel with warp specialization or tile-and-send, suited to iterative fine-grained exchanges where per-round host overhead dominates.
+\item \emph{Stream-level overlap} --- separate high-priority communication and compute streams, suited to bulk transfers between large compute phases where kernel fusion complexity is unwarranted.
+\item \emph{Split put/wait} --- deferred completion with intervening compute, suited to pipelining where the sender can proceed with useful work after issuing the put but before confirming delivery.
+\end{itemize}
+The framework does not prescribe a preferred strategy; it articulates the conditions under which each approach dominates and leaves the architectural decision to the agent. Layered on top of this shared framework are \emph{backend-specific correctness rules}, conditioned on $\mathcal{B}$, that distill hard-won operational knowledge:
+\begin{itemize}[leftmargin=1.4em,itemsep=1pt,topsep=2pt]
+\item \textbf{GIN rules:} windows must use \texttt{ncclMemAlloc}; \texttt{waitSignal} polls this rank's own signal counter; \texttt{flush} must match the thread group that issued the puts; signal counters are monotonically increasing and must not be reset within a kernel.
+\item \textbf{LSA rules:} barrier index should use \texttt{blockIdx.x} for CTA uniqueness; use \texttt{memory\_order\_release} after writes and \texttt{memory\_order\_acquire} before reads; all ranks in the LSA team must reach the barrier before any peer pointers are dereferenced.
+\end{itemize}
+These rules reduce the space of plausible-but-incorrect programs without constraining architectural exploration.
+
+\paragraph{Hardware Context.}
+Rather than hardcoding hardware descriptions, \cufuse{} dynamically extracts the hardware context from the evaluation harness's build and run configuration (compiler flags, MPI topology, NCCL version), mapping GPU architecture codes to known device properties via a lookup table. This makes the context portable across deployments: changing the target GPU or topology in the evaluation harness automatically updates the agent's hardware knowledge. The extracted context provides four categories:
+\begin{itemize}[leftmargin=1.4em,itemsep=1pt,topsep=2pt]
+\item \emph{GPU architecture}: device model, SM count, HBM bandwidth, shared-memory capacity, thread limits---grounding launch configuration and occupancy decisions.
+\item \emph{Topology and interconnect}: number of ranks, inter- vs.\ intra-node placement, network type (InfiniBand, RoCE, NVLink), and peer-connectivity reachability---grounding backend selection $\mathcal{B}$ and synchronization scope $\mathcal{S}$.
+\item \emph{Build environment}: CUDA and NCCL versions, compiler flags, MPI configuration---ensuring the agent generates code compatible with the toolchain.
+\item \emph{Resource budgeting}: concrete SM-overhead estimates for communication kernels, NIC DMA independence properties for GIN, and guidance on how lightweight put/wait kernels are relative to the total SM budget---grounding placement $\mathcal{P}$ and issuer $\mathcal{I}$ decisions.
+\end{itemize}
+Together, these ensure that agent decisions---block counts, stream priorities, overlap strategy, backend choice---reflect the physical realities of the target deployment rather than training-time priors.
+
+
+\section{Fast-Path Transformation Details}\label{sec:fast_path_details}
+
+The fast-path agent converts a host-driven compute--communication program into a verified device-initiated implementation through a three-step pipeline. This section details each step.
+
+\paragraph{CUDA Code Analysis.}
+Because the input is user-written code rather than a formal specification, the agent must first recover a precise compute--communication boundary to ground the transformation. A lightweight static analyzer identifies all host-driven NCCL collectives, their buffer operands, data dependencies, and ordering constraints, producing a communication dependency graph. For each NCCL collective, the graph identifies: (1) the buffer operands and their allocation method (flagging \texttt{cudaMalloc} buffers that will need migration to \texttt{ncclMemAlloc} for device-initiated communication), (2) the producer and consumer kernels that define data-flow dependencies, and (3) the execution ordering constraints imposed by stream synchronization. This graph defines the transformation targets for later stages. Appendix~\ref{app:analysis_example} illustrates the analyzer's input and output on a representative MoE dispatch--compute--combine pipeline.
+
+\paragraph{Host-to-Device Transformation.}
+Using the dependency graph, the agent rewrites host-driven communication into device-initiated forms. The transformation proceeds in two stages, each guided by an LLM--judge feedback loop that ensures the rewritten program both compiles and matches the host baseline in correctness. The pipeline follows an empirical observation that converting host-driven NCCL to device-initiated communication naturally decomposes into two tasks: communication setup and semantic replacement. Solving both at once significantly increases the likelihood of correctness failures; separating them constrains each LLM interaction to a single concern, reducing the per-stage failure space and making judge feedback more targeted.
+
+\noindent\underline{\emph{Stage~A: Communication Setup.}} The LLM constructs the host-side infrastructure required by the NCCL device API in three steps:
+\begin{enumerate}[leftmargin=1.4em,itemsep=1pt,topsep=2pt]
+\item \emph{Symmetric memory allocation}: All buffers identified by the analyzer as requiring device-initiated access are migrated from \texttt{cudaMalloc} to \texttt{ncclMemAlloc}, which allocates memory uniformly addressable across ranks.
+\item \emph{Communicator configuration}: The communicator requirements are configured according to $\mathcal{B}$---using the LSA barrier count for $\mathcal{B}{=}\texttt{LSA}$, or the GIN barrier and signal counts for $\mathcal{B}{=}\texttt{GIN}$, reflecting each backend's distinct synchronization model (memory-based barriers vs.\ network-initiated signals).
+\item \emph{Device communicator instantiation}: The device communicator is instantiated using the populated requirements and registered as a kernel argument, making the communication context available on-device.
+\end{enumerate}
+Compute and communication logic remain unchanged during Stage~A. The LLM judge verifies compilation and, on failure, identifies the root cause and feeds corrective feedback into the next rewrite iteration. Stage~A typically converges in 1--2 iterations.
+
+\noindent\underline{\emph{Stage~B: Communication Replacement.}} With infrastructure in place, the LLM replaces each host-driven collective with its device-initiated equivalent. To prioritize correctness over performance, all directive dimensions are set conservatively:
+\begin{itemize}[leftmargin=1.4em,itemsep=1pt,topsep=2pt]
+\item CTA-level issuance ($\mathcal{I}{=}\texttt{CTA}$) to avoid warp-level divergence.
+\item Barrier completion ($\mathcal{M}{=}\texttt{Barrier}$) to ensure deterministic collective synchronization.
+\item World synchronization scope ($\mathcal{S}{=}\texttt{World}$) to ensure cross-rank visibility before compute resumes.
+\item Deferred placement ($\mathcal{P}{=}\texttt{Deferred}$) to minimize ordering complexity.
+\item Per-peer granularity ($\mathcal{G}{=}\texttt{Per\text{-}peer}$) to amortize per-operation overhead.
+\item Release ordering ($\mathcal{O}{=}\texttt{Release}$) to guarantee write visibility.
+\item Single context ($\mathcal{K}{=}1$) to avoid multi-context synchronization issues.
+\end{itemize}
+Backend-specific translation then maps host collectives to device primitives: for $\mathcal{B}{=}\texttt{GIN}$, host collectives map to \texttt{ncclGinPut} (one-sided network transfer), followed by \texttt{ncclGinWaitSignal} and \texttt{ncclGinFlush} to confirm remote delivery; for $\mathcal{B}{=}\texttt{LSA}$, to direct peer memory stores via \texttt{ncclGetLsaPointer} synchronized with \texttt{ncclLsaBarrierSession}. The LLM judge reviews each generated variant for compilation and correctness issues, summarizes the likely root causes, and feeds targeted guidance back to the model for a corrective regeneration. Using an LLM judge rather than rule-based error parsing is essential because CUDA failures often hinge on contextual reasoning---such as inferring which missing synchronization, ordering constraint, or API misuse triggered a particular error. Stage~B typically converges in 1--3 iterations.
+
+\paragraph{Evolve-Block Annotation.}
+The verified device-initiated program is automatically annotated with mutable-region markers that define the optimization scope for the slow-path agent. An annotator combining LLM analysis with pattern-based heuristics emits paired \emph{EVOLVE-BLOCK-START} / \emph{EVOLVE-BLOCK-END} markers around regions whose communication or compute structure admits optimization under the full constraint set $\mathcal{C}$. Frozen regions---initialization, verification logic, output formatting---are excluded, ensuring that downstream mutations cannot break the evaluation harness. Critically, the $n$ annotated regions are co-optimized as a single candidate rather than treated as independent subproblems, since mutations can interact across boundaries: a change to transfer granularity ($\mathcal{G}$) in one region may alter the synchronization requirements ($\mathcal{S}$) of another, or a shift from barrier to signal completion ($\mathcal{M}$) may require corresponding changes to memory ordering ($\mathcal{O}$) in a different region.
+
+The resulting annotated program is promoted as the \emph{seed}---a correctness-preserving but intentionally unoptimized baseline that is passed to the slow-path agent as generation zero of the evolutionary search for performance improvements.
+
+
+\section{Multi-Island Evolution Details}\label{sec:multi-island}
+
+The slow-path agent uses a multi-island evolutionary framework to prevent premature convergence and maintain diversity across the search space $\mathcal{C}$.
+
+\paragraph{Island Initialization.}
+The search maintains $K$ independent islands, each initialized from a distinct seed---a semantically different variant of the fast-path baseline produced by prompting the LLM with different directive configurations drawn from $\mathcal{C}$. For example, one seed might use GIN with signal-based completion and stream-split placement, while another uses LSA with barrier completion and tile-fused placement. While a seed is a single starting program, an island is a full subpopulation of candidates evolved from that seed, maintaining its own evolutionary lineage. Each island evolves independently: one may converge on a multi-stream overlap strategy while another develops a fused cooperative-kernel approach entirely independently, ensuring that structurally different optimization strategies survive long enough to be evaluated on their merits.
+
+\paragraph{Selection.}
+Within each island, parent selection uses fitness-weighted sampling with configurable selection pressure, biasing reproduction toward high-performing candidates while preserving exploration breadth. The fitness score is the cascade evaluation score: $\text{score}(c) = 10000 / (1 + t_{\text{ms}})$ for candidates passing all three levels, or zero for candidates failing at $\ell_1$ or $\ell_2$. The selected parent, together with its stored evaluation history and LLM feedback, is passed to the search policy and mutation operator.
+
+\paragraph{Migration.}
+Every $G_m$ generations, the top-$k$ scoring individuals from each island are copied into randomly selected target islands, cross-pollinating successful patterns without collapsing diversity. Migration operates entirely in the program-text domain: high-scoring source code is directly inserted into the target island's population and subjected to the same LLM-guided mutation operators in subsequent generations. This design avoids the need for genotype encodings or crossover operators that would require structural alignment between candidates---the LLM naturally handles structural differences when it encounters a migrated program as a parent or archive inspiration.
+
+\paragraph{MAP-Elites Archive.}
+In addition to the per-island populations, the search maintains a global MAP-Elites diversity archive~\cite{mapelites}. The archive is a grid indexed by behavioral descriptors derived from the optimization directive (e.g., backend, placement strategy, completion mechanism), with each cell storing the highest-scoring candidate exhibiting that behavioral profile. Archive entries serve as cross-pollination inspirations during mutation: the LLM receives archive samples alongside the selected parent, exposing it to structurally distinct high-performing solutions from outside the current lineage. This mechanism is analogous to crossover across distant population members in traditional evolutionary algorithms, but operates at the semantic level of program structure rather than syntactic gene alignment.
+
+\paragraph{Candidate Database.}
+All evaluated candidates---including those eliminated at $\ell_1$ and $\ell_2$---are persisted to a shared candidate database. Each record stores the program text, the cascade score, the LLM feedback diagnostic, and a code embedding vector produced by a neural code encoder. The database serves two roles: (1) it is the candidate pool for parent selection and MAP-Elites archive sampling across all islands, and (2) it is the persistent backing store for the meta-summarizer (Appendix~\ref{sec:meta}), which queries historical results across all generations to distill cross-generation patterns into the mutation context.
+
+Retrieval from the database is embedding-guided: at each generation, the current candidate's code embedding is used to query the database for the $k$ nearest neighbors by cosine similarity, surfacing structurally similar programs and their associated feedback. The retrieved records---both successes and failures---are injected into the LLM mutation prompt as in-context examples, allowing the agent to avoid previously failed transformations and build on patterns that improved performance in similar program structures.
+
+\section{Static Analysis Example}
+\label{app:analysis_example}
+
+Listing~\ref{lst:host_moe} shows a simplified host-driven MoE pipeline following the DeepSeek-V3 dispatch--compute--combine pattern. Two \texttt{ncclAlltoAll} calls bracket an expert-compute phase: the first dispatches quantized tokens to remote experts, the second returns the processed results. All communication is host-driven and strictly sequential---no overlap with compute is possible.
+
+\begin{lstlisting}[style=customc2,caption={Simplified host-driven MoE pipeline (input to the static analyzer).},label={lst:host_moe}]
+void run_moe(int rank, int nranks, ncclComm_t comm) {
+  cudaStream_t stream;
+  cudaStreamCreate(&stream);
+
+  // --- Buffers (cudaMalloc, not device-comm compatible) ---
+  int8_t *d_quant_send, *d_quant_recv;
+  float  *d_expert_out, *d_final_out;
+  cudaMalloc(&d_quant_send, chunk_bytes);
+  cudaMalloc(&d_quant_recv, chunk_bytes);
+  cudaMalloc(&d_expert_out, out_bytes);
+  cudaMalloc(&d_final_out,  out_bytes);
+
+  // --- Quantize tokens ---
+  quantize<<<grid, block, 0, stream>>>(
+      d_input, d_quant_send, d_scales, num_tokens, HIDDEN);
+
+  // --- Dispatch: host-driven AlltoAll (int8) ---
+  ncclAlltoAll(d_quant_send, d_quant_recv,
+               chunk_elems, ncclInt8, comm, stream);
+  cudaStreamSynchronize(stream);
+
+  // --- Expert compute ---
+  dequantize<<<grid, block, 0, stream>>>(
+      d_quant_recv, d_deq, d_scales, num_tokens, HIDDEN);
+  gemm<<<grid, block, 0, stream>>>(
+      d_deq, d_W1, d_gemm1, tokens, GEMM1_DIM, HIDDEN);
+  swiGLU<<<grid, block, 0, stream>>>(
+      d_gemm1, d_swiglu, tokens, INTER_DIM);
+  gemm<<<grid, block, 0, stream>>>(
+      d_swiglu, d_W2, d_expert_out, tokens, HIDDEN, INTER_DIM);
+
+  // --- Combine: host-driven AlltoAll (float) ---
+  ncclAlltoAll(d_expert_out, d_final_out,
+               chunk_elems, ncclFloat, comm, stream);
+  cudaStreamSynchronize(stream);
+}
+\end{lstlisting}
+
+The static analyzer processes Listing~\ref{lst:host_moe} and produces the communication dependency graph shown in Listing~\ref{lst:comm_graph}. For each NCCL collective, the graph identifies the buffer operands, their allocation method (flagging \texttt{cudaMalloc} buffers that will need migration to \texttt{ncclMemAlloc} for device-initiated communication), and the producer/consumer kernels---establishing the data-flow context that subsequent pipeline steps use to determine transformation targets.
+
+\begin{lstlisting}[style=customc2,caption={Communication dependency graph produced by the static analyzer for Listing~\ref{lst:host_moe}.},label={lst:comm_graph}]
+Communication Graph
+  Node 1: ncclAlltoAll (line 19)
+    Stream: stream
+    Count: chunk_elems, Datatype: ncclInt8
+
+    Send buffer: d_quant_send
+      Allocated: cudaMalloc (line 8) [needs ncclMemAlloc]
+      Produced by: quantize<<<...>>> (line 15)
+    Recv buffer: d_quant_recv
+      Allocated: cudaMalloc (line 9) [needs ncclMemAlloc]
+      Consumed by: dequantize<<<...>>> (line 24)
+
+    Device-side transformation:
+      Pattern: AlltoAll -- rank r sends sendbuf[peer*chunk]
+               to peer's recvbuf[r*chunk] + local self-copy
+      Buffers needing ncclMemAlloc: d_quant_send, d_quant_recv
+
+  Node 2: ncclAlltoAll (line 34)
+    Stream: stream
+    Count: chunk_elems, Datatype: ncclFloat
+
+    Send buffer: d_expert_out
+      Allocated: cudaMalloc (line 10) [needs ncclMemAlloc]
+      Produced by: gemm<<<...>>> (line 30)
+    Recv buffer: d_final_out
+      Allocated: cudaMalloc (line 11) [needs ncclMemAlloc]
+
+    Device-side transformation:
+      Pattern: AlltoAll -- rank r sends sendbuf[peer*chunk]
+               to peer's recvbuf[r*chunk] + local self-copy
+      Buffers needing ncclMemAlloc: d_expert_out, d_final_out
+
+Execution Order
+  run_moe: quantize<<<...>>> [compute]
+           -> ncclAlltoAll [communicate]
+           -> dequantize<<<...>>> [compute]
+           -> gemm<<<...>>> [compute]
+           -> swiGLU<<<...>>> [compute]
+           -> gemm<<<...>>> [compute]
+           -> ncclAlltoAll [communicate]
+\end{lstlisting}
+
+\section{Optimization Directive Listing}\label{sec:directive_listing}
+
+The following shows the literal directive syntax that each agent emits before generating kernel code. Each field selects one value from the corresponding dimension of the configuration space $\mathcal{C}$ (Table~\ref{tab:fusion_space} in the main text).
+
+\begin{lstlisting}[style=customc2]
+optimization_directive:
+  backend:    <GIN | LSA | Hybrid>
+  completion: <Barrier | Signal | SignalShadow | Counter>
+  sync_scope: <Local | World | Rail | Hierarchical>
+  issuer:     <Thread | Warp | WarpSpan | Tile<N> | CTA>
+  ordering:   <Relaxed | Acquire | Release | AcqRel>
+  contexts:   <1 | 2 | 4>
+  placement:  <intent: overlap aggressiveness>
+  chunk_size: <intent: transfer granularity>
+\end{lstlisting}
+
+\section{Slow-Path Evolutionary Search Algorithm}\label{sec:slowpath_algo}
+
+Algorithm~\ref{alg:slowpath} provides the formal pseudocode for the slow-path evolutionary search described in Section~\ref{subsec:slow_path}. The outer loop iterates over generations; within each generation, every island selects a parent, applies the LLM mutation operator (Algorithm~\ref{alg:llmmutate_appendix}), evaluates the offspring through the cascade, and updates the population, archive, and database. Periodically, high-scoring candidates migrate between islands.
+
+\begin{algorithm}[H]
+\caption{\cufuse{} Slow-Path: LLM-Driven Evolutionary Search}
+\label{alg:slowpath}
+\begin{algorithmic}[1]
+\setlength{\itemsep}{0pt}
+\setlength{\parskip}{0pt}
+\Require{Baseline kernel $c_0 \in \mathcal{C}$, island count $k$, generation budget $G$, explore fraction $\alpha \in (0,1)$}
+\Ensure{Optimized kernel $c^* \in \mathcal{C}$}
+\State $\mathcal{P}_i \gets \textsc{Init}(c_0)$ for $i = 1, \ldots, k$
+\State $\mathcal{DB},\ \mathcal{A} \gets \emptyset, \emptyset$
+\For{$g \gets 1$ \textbf{to} $G$}
+    \For{$i \gets 1$ \textbf{to} $k$}
+        \State $p \gets \textsc{Select}(\mathcal{P}_i)$
+        \State $c' \gets \textsc{LLMMutate}(p,\ \mathcal{A},\ \mathcal{DB},\ g,\ G,\ \alpha)$ \Comment{Alg.~\ref{alg:llmmutate_appendix}}
+        \State $s \gets \textsc{CascadeEval}(c')$ \Comment{$\ell_1$: compile $\to$ $\ell_2$: verify $\to$ $\ell_3$: bench}
+        \State $\mathcal{P}_i,\ \mathcal{A},\ \mathcal{DB} \gets \textsc{Update}(\mathcal{P}_i,\ \mathcal{A},\ \mathcal{DB},\ c',\ s)$
+    \EndFor
+    \State $\textsc{Migrate}(\mathcal{P}_1, \ldots, \mathcal{P}_k)$
+\EndFor
+\State \Return $c^* \gets \arg\max_{c\ \in\ \mathcal{DB}}\ s(c)$
+\end{algorithmic}
+\end{algorithm}
+
+\section{LLMMutate: Phase-Dependent Variation Operator}\label{sec:llmmutate_details}
+
+Algorithm~\ref{alg:llmmutate_appendix} details the \textsc{LLMMutate} operator used by the slow-path evolutionary search (Algorithm~\ref{alg:slowpath}). The operator selects an explore or exploit phase based on the current generation relative to the budget, constructs a context from the parent, archive, and meta-summarizer, and dispatches to one of three mutation forms at a phase-appropriate temperature.
+
+\begin{algorithm}[H]
+\caption{\textsc{LLMMutate}: Phase-Dependent Variation Operator}
+\label{alg:llmmutate_appendix}
+\begin{algorithmic}[1]
+\setlength{\itemsep}{0pt}
+\setlength{\parskip}{0pt}
+\Require{Parent $p \in \mathcal{C}$, archive $\mathcal{A}$, database $\mathcal{DB}$, generation $g$, budget $G$, explore fraction $\alpha$}
+\Ensure{Offspring $c' \in \mathcal{C}$}
+\State $\phi \gets \begin{cases} \textsc{Explore} & g \leq \alpha G \\ \textsc{Exploit} & g > \alpha G \end{cases}$
+\State $\text{ctx} \gets (p,\ \textsc{ArchiveSample}(\mathcal{A}),\ \textsc{MetaSummarize}(\mathcal{DB}))$
+\If{$\phi = \textsc{Explore}$}
+    \State $\text{form} \sim \text{Categorical}(\textsc{Rewrite} \gg \textsc{Diff},\ \textsc{Crossover})$
+    \State $c' \gets \textsc{LLM}(\text{ctx},\ \text{form},\ \tau_{\text{high}})$
+\Else
+    \State $\text{form} \sim \text{Categorical}(\textsc{Diff} \gg \textsc{Rewrite},\ \textsc{Crossover})$
+    \State $c' \gets \textsc{LLM}(\text{ctx},\ \text{form},\ \tau_{\text{low}})$
+\EndIf
+\State \Return $c'$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Novelty Filtering}
+\noindent\textbf{Novelty Filtering.}
+To prevent population collapse to near-identical programs, the search engine applies embedding-based novelty filtering. Each candidate's code is embedded via a neural code encoder, and candidates whose cosine similarity to any existing database entry exceeds a configurable threshold are rejected and resampled. This mechanism, combined with the multi-island structure and MAP-Elites archive, maintains structural diversity throughout the search and prevents the optimizer from repeatedly proposing minor lexical variants of the current best.
+
+\section{Meta-Summarizer}\label{sec:meta}
+
+The meta-summarizer is a periodic LLM-driven analysis module that extracts optimization patterns from accumulated evolution history and injects them back into the search as actionable recommendations. Every $k$ generations, it executes a three-step pipeline: (i)~\emph{summarize} the most recent batch of candidates---their scores, mutation types, architectural choices, and evaluation feedback---into a concise digest; (ii)~\emph{update} a persistent global scratchpad that tracks which strategies have been attempted, which succeeded, and which failed across the full evolution history; and (iii)~\emph{recommend} a ranked set of concrete optimization directions for the next generation, grounded in the accumulated evidence.
+
+These recommendations are injected into the system prompt consumed by the LLM mutation operator, providing generation-over-generation learning without modifying the optimizer's architecture or search parameters. The meta-summarizer enables the search to develop an evolving understanding of what works for a specific workload and hardware target: early recommendations may suggest exploring different fusion levels, while later recommendations---informed by observing that multi-stream overlap consistently outperforms full fusion for a particular communication pattern---may redirect effort toward refining that specific strategy. This closed-loop meta-learning distinguishes the slow-path agent from static evolutionary code search: the mutation operator's effective behavior adapts over the course of evolution based on empirical evidence rather than fixed heuristics.
+
+\section{Search Cost Details}\label{sec:search-cost-details}
+
+Table~\ref{tab:search-cost} provides a per-workload breakdown of the search cost, including fast-path iterations, slow-path generations, wall-clock time, and total LLM API fees.
+
+\begin{table}[h]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{5pt}
+\caption{Search cost per workload. All runs use Claude Sonnet~4.5.}
+\label{tab:search-cost}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Workload} & \textbf{Fast-Path Iter.} & \textbf{Slow-Path Gen.} & \textbf{Wall Time} & \textbf{LLM Cost} \\
+\midrule
+Flash Attention   & 3 & 20 & ${\sim}$1.8\,hr & \$10.96 \\
+MoE (GIN)        & 2 & 18 & ${\sim}$1.5\,hr & \$10.20 \\
+KV-Cache         & 2 & 18 & ${\sim}$1.5\,hr & \$9.74 \\
+GEMM + AllGather & 2 & 10 & ${\sim}$51\,min & \$4.98 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Workload Details}\label{sec:workload_details}
+
+This section provides full descriptions of the four evaluation workloads, including host baseline implementations and the co-design pipelines discovered by \cufuse{}.
+
+\paragraph{Flash Attention with Context Parallelism.}
+Flash Attention with Context Parallelism scales attention over long sequences by partitioning the query, key, and value tensors along the sequence dimension across multiple GPUs. Each GPU permanently owns one Q shard while KV shards rotate in a ring topology (Ring Attention~\cite{liu2024ringattention}). As each GPU computes attention over its local KV tile, it concurrently receives the next KV block from its neighbor. Inspired by GPT-2's multi-head attention architecture, we evaluate on 4 GPUs (intra-node, NVLink) with configurations spanning $\text{SEQUENCE\_LENGTH} \in \{4096, 8192\}$ and $\text{HEAD\_DIM} \in \{32, 64\}$.
+
+\paragraph{DeepSeek-V3 MoE Dispatch and Combine.}
+We reproduce the MoE expert parallelism layer of DeepSeek-V3, in which each GPU routes its tokens to remote experts via an AlltoAll dispatch, runs expert computation, and gathers results via a reverse AlltoAll combine. The pipeline consists of: (1)~quantize tokens to int8, (2)~dispatch via AlltoAll, (3)~dequantize + GEMM1 (up/gate projection, $7168 \times 4096$) + SwiGLU activation + GEMM2 (down projection, $2048 \times 7168$) on the expert GPU, and (4)~combine results via reverse AlltoAll. The host baseline uses two-stream overlap with padded \texttt{ncclAlltoAll} on a dedicated communication stream. The \cufuse{} version replaces this with GIN one-sided RDMA puts using split put/wait kernels on separate streams, enabling variable-size per-peer transfers that avoid padding overhead, and overlapping dispatch with self-chunk expert compute concurrently with the network transfer. We evaluate on 2~GPUs across inter-node RoCE links with 4096~total tokens per rank under four sparse routing imbalance ratios (2:1, 3:1, 4:1, 5:1) to characterize the sensitivity of GIN to workload skew.
+
+\paragraph{KV-Cache Transfer.}
+KV-cache transfer in disaggregated prefill--decode serving requires the prefill GPU to compute and send the K and V projections before the decode stage can run attention. The flow is: compute K, send it, compute V while K is in flight, then send V with a readiness signal. The main bottleneck is the compute-to-send gap introduced by NCCL's CPU-launched transfers, which leave the network idle after each compute phase. The \cufuse{} path removes this gap by chaining a K GEMM, a GPU-triggered send, an overlapping V GEMM, and a final send with a signal increment; the decode GPU waits entirely on-device. We evaluate on two NVLink-connected GPUs with hidden dimension 4096.
+
+\paragraph{GEMM + AllGather.}
+Each rank performs a local FP32 GEMM ($C = AB$, $M{=}N{=}K{=}4096$) and then participates in an AllGather so every GPU receives the full concatenated output. This workload isolates the simplest post-compute collective: once a rank completes its GEMM, its output can be broadcast immediately with no cross-rank dependencies, enabling clear opportunities for device-initiated communication. Intra-node transfers over NVLink use LSA, while inter-node transfers over RoCE use GIN. We evaluate on four GPUs spanning both intra- and inter-node links.
+
+\section{Flash Attention Case Study: Full Architecture}\label{sec:flash_attn_details}
+
+This section provides the full architectural details of the \cufuse{}-evolved Flash Attention kernel and the host baseline, complementing the summary in Section~\ref{sec:flash-attn-deep-dive}.
+
+\paragraph{GIN Fused Kernel Architecture.}
+The \cufuse{} evolved kernel launches a single cooperative grid of $B \times n_h + 1 = 81$ blocks via \texttt{cudaLaunchCooperativeKernel}. Block~0 is the \emph{communication block}: it runs the entire ring protocol---GIN put/wait/flush for all 256 tiles across all 3 exchange rounds---using device-side atomic counters for synchronization. The remaining 80 blocks are \emph{compute blocks}, each handling one (batch, head) pair across all rounds. KV data is stored in a tile-first memory layout and double-buffered between two NCCL-registered windows.
+
+The critical capability is \emph{per-tile pipelining}: as the comm block completes the transfer of tile~$j$ and increments a \texttt{tile\_ready} counter via \texttt{atomicAdd}, compute blocks immediately begin processing tile~$j$ by polling with \texttt{\_\_nanosleep(100)}---even while tiles $j\!+\!1$ through $T_c$ are still in flight. This eliminates the pipeline bubble between communication and computation within each round.
+
+\paragraph{Host Baseline Architecture.}
+The host version launches a separate attention kernel per round and issues per-tile \texttt{ncclGroup} calls from the CPU between rounds---768 host NCCL API call groups in total. Because the attention kernel (80 blocks) saturates all SMs, a small signaling kernel on the communication stream can never be scheduled---creating a GPU-side priority inversion that prevents per-tile pipelining. The host version must therefore wait for \emph{all} tiles to finish exchanging before launching the next round's attention kernel, forcing a purely sequential execution pattern.

@@ -1,0 +1,547 @@
+@misc{fang2024usp,
+      title={USP: A Unified Sequence Parallelism Approach for Long Context Generative AI},
+      author={Jiarui Fang and Shangchun Zhao},
+      year={2024},
+      eprint={2405.07719},
+      archivePrefix={arXiv},
+      primaryClass={cs.DC},
+}
+
+@inproceedings{coconet_asplos2022,
+      title={CoCoNet: Co-Optimizing Computation and Communication for Distributed Machine Learning},
+      author={Jain, Abhinav and Phanishayee, Amar and Mars, Jason and Tang, Lingjia and Pekhimenko, Gennady},
+      booktitle={Proceedings of the 27th ACM International Conference on Architectural Support for Programming Languages and Operating Systems},
+      year={2022},
+}
+
+@inproceedings{liu2024ringattention,
+      title={RingAttention with Blockwise Transformers for Near-Infinite Context},
+      author={Hao Liu and Matei Zaharia and Pieter Abbeel},
+      booktitle={The Twelfth International Conference on Learning Representations},
+      year={2024},
+      url={https://openreview.net/forum?id=WsRHpHH4s0}
+}
+
+@inproceedings{shah2024flashattention,
+      title={FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision},
+      author={Shah, Jay and Bikshandi, Ganesh and Zhang, Ying and Thakkar, Vijay and Ramani, Pradeep and Dao, Tri},
+      booktitle={The Thirty-eighth Annual Conference on Neural Information Processing Systems},
+      year={2024},
+      url={https://openreview.net/forum?id=tVConYid20}
+}
+
+@misc{mapelites,
+      title={Illuminating search spaces by mapping elites},
+      author={Mouret, Jean-Baptiste and Clune, Jeff},
+      year={2015},
+      eprint={1504.04909},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+}
+
+@misc{breaking_abstraction,
+      title={Breaking the Abstraction Barrier of Communication and Computation in Distributed Machine Learning},
+      author={Abhinav Jain and others},
+      year={2024},
+      note={Workshop paper},
+}
+
+@periodical{bush:1945:awmt,
+    title = {As We May Think}, 
+    journal = {The Atlantic Monthly}, 
+    organization = {The Atlantic},
+    volume = {176}, 
+    number = {1}, 
+    pages = {101--108}, 
+    year = {1945}, 
+    url = {http://www.theatlantic.com/magazine/archive/1945/07/as-we-may-think/303881/}, 
+    lastaccessed = {August 7, 2023}
+}
+
+@inproceedings{coconet,
+author = {Jangda, Abhinav and Huang, Jun and Liu, Guodong and Sabet, Amir Hossein Nodehi and Maleki, Saeed and Miao, Youshan and Musuvathi, Madanlal and Mytkowicz, Todd and Saarikivi, Olli},
+title = {Breaking the computation and communication abstraction barrier in distributed machine learning workloads},
+year = {2022},
+isbn = {9781450392051},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3503222.3507778},
+doi = {10.1145/3503222.3507778},
+abstract = {Recent trends towards large machine learning models require both training and inference tasks to be distributed. Considering the huge cost of training these models, it is imperative to unlock optimizations in computation and communication to obtain best performance. However, the current logical separation between computation and communication kernels in machine learning frameworks misses optimization opportunities across this barrier. Breaking this abstraction can provide many optimizations to improve the performance of distributed workloads. However, manually applying these optimizations requires modifying the underlying computation and communication libraries for each scenario, which is both time consuming and error-prone.  Therefore, we present CoCoNet, which contains (i) a domain specific language to express a distributed machine learning program in the form of computation and communication operations, (ii) a set of semantics preserving transformations to optimize the program, and (iii) a compiler to generate jointly optimized communication and computation GPU kernels. Providing both computation and communication as first class constructs allows users to work on a high-level abstraction and apply powerful optimizations, such as fusion or overlapping of communication and computation. CoCoNet enabled us to optimize data-, model- and pipeline-parallel workloads in large language models with only a few lines of code. Our experiments show that CoCoNet significantly outperforms state-of-the-art distributed machine learning implementations.},
+booktitle = {Proceedings of the 27th ACM International Conference on Architectural Support for Programming Languages and Operating Systems},
+pages = {402–416},
+numpages = {15},
+keywords = {CUDA, Code Generation, Collective Communication, Compiler Optimizations, Distributed Machine Learning, MPI},
+location = {Lausanne, Switzerland},
+series = {ASPLOS '22}
+}
+
+@misc{chang2024flux,
+      title={FLUX: Fast Software-based Communication Overlap On GPUs Through Kernel Fusion},
+      author={Li-Wen Chang and Wenlei Bao and Qi Hou and Chengquan Jiang and Ningxin Zheng and Yinmin Zhong and Xuanrun Zhang and Zuquan Song and Ziheng Jiang and Haibin Lin and Xin Jin and Xin Liu},
+      year={2024},
+      eprint={2406.06858},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG}
+}
+
+@misc{cublas,
+  author       = {{NVIDIA Corporation}},
+  title        = {{cuBLAS} Library User Guide},
+  year         = {2026},
+  howpublished = {\url{https://docs.nvidia.com/cuda/cublas/}},
+}
+
+@misc{chetlur2014cudnnefficientprimitivesdeep,
+      title={cuDNN: Efficient Primitives for Deep Learning}, 
+      author={Sharan Chetlur and Cliff Woolley and Philippe Vandermersch and Jonathan Cohen and John Tran and Bryan Catanzaro and Evan Shelhamer},
+      year={2014},
+      eprint={1410.0759},
+      archivePrefix={arXiv},
+      primaryClass={cs.NE},
+      url={https://arxiv.org/abs/1410.0759}, 
+}
+
+@misc{nccl,
+  author       = {{NVIDIA Corporation}},
+  title        = {{NCCL}: {NVIDIA} Collective Communications Library},
+  year         = {2026},
+  howpublished = {\url{https://developer.nvidia.com/nccl}},
+}
+
+@misc{nvshmem,
+  author       = {{NVIDIA Corporation}},
+  title        = {{NVSHMEM}},
+  year         = {2026},
+  howpublished = {\url{https://developer.nvidia.com/nvshmem}},
+}
+
+@misc{nccl_deviceapi,
+  author       = {{NVIDIA Corporation}},
+  title        = {{NCCL} Device-Initiated Communication},
+  year         = {2026},
+  howpublished = {\url{https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/deviceapi.html}},
+  note         = {NCCL 2.28.9 User Guide}
+}
+
+@misc{deepep2025,
+      title={DeepEP: an efficient expert-parallel communication library},
+      author={Chenggang Zhao and Shangyan Zhou and Liyue Zhang and Chengqi Deng and Zhean Xu and Yuxuan Liu and Kuai Yu and Jiashi Li and Liang Zhao},
+      year={2025},
+      publisher = {GitHub},
+      howpublished = {\url{https://github.com/deepseek-ai/DeepEP}},
+}
+
+@misc{licker2025rdmap2p,
+      title={{RDMA Point-to-Point Communication for LLM Systems}},
+      author={Nandor Licker and Kevin Hu and Vladimir Zaytsev and Lequn Chen},
+      year={2025},
+      eprint={2510.27656},
+      archivePrefix={arXiv},
+      primaryClass={cs.DC},
+      url={https://arxiv.org/abs/2510.27656},
+      note={Open-source MoE/RDMA kernels released as \emph{pplx-garden} (\url{https://github.com/perplexityai/pplx-garden})},
+}
+
+@misc{gond2025tokenweave,
+  title={TokenWeave: Efficient Compute-Communication Overlap for Distributed LLM Inference},
+  author={Raja Gond and Nipun Kwatra and Ramachandran Ramjee},
+  year={2025},
+  url={https://arxiv.org/abs/2505.11329}
+}
+
+@misc{sul2025parallelkittenssystematicpracticalsimplification,
+      title={ParallelKittens: Systematic and Practical Simplification of Multi-GPU AI Kernels}, 
+      author={Stuart H. Sul and Simran Arora and Benjamin F. Spector and Christopher Ré},
+      year={2025},
+      eprint={2511.13940},
+      archivePrefix={arXiv},
+      primaryClass={cs.DC},
+      url={https://arxiv.org/abs/2511.13940}, 
+}
+
+
+@article{zheng2025tilelink,
+  title={Tilelink: Generating efficient compute-communication overlapping kernels using tile-centric primitives},
+  author={Zheng, Size and Fang, Jin and Zheng, Xuegui and Hou, Qi and Bao, Wenlei and Zheng, Ningxin and Jiang, Ziheng and Wang, Dongyang and Ye, Jianxi and Lin, Haibin and others},
+  journal={arXiv preprint arXiv:2503.20313},
+  year={2025}
+}
+
+@inproceedings{nanoflow,
+author = {Zhu, Kan and Gao, Yufei and Zhao, Yilong and Zhao, Liangyu and Zuo, Gefei and Gu, Yile and Xie, Dedong and Tang, Tian and Xu, Qinyu and Ye, Zihao and Kamahori, Keisuke and Lin, Chien-Yu and Wang, Ziren and Wang, Stephanie and Krishnamurthy, Arvind and Kasikci, Baris},
+title = {NanoFlow: towards optimal large language model serving throughput},
+year = {2025},
+isbn = {978-1-939133-47-2},
+publisher = {USENIX Association},
+address = {USA},
+abstract = {Large Language Models (LLMs) have resulted in a surging demand for planet-scale serving systems, where tens of thousands of GPUs continuously serve hundreds of millions of users. Consequently, throughput has emerged as a key metric that determines serving systems' performance. Due to large model sizes and memory-intensive self-attention, LLM serving has been commonly assumed to be memory-bound. Through a detailed analysis, we show that despite having memory-intensive components, end-to-end LLM serving is compute bound for most common workloads and LLMs. Alas, most existing serving engines fall short from optimal compute utilization, because the heterogeneous operations that comprise LLM serving--compute, memory, networking--are executed sequentially within a device.We propose NanoFlow, a novel serving framework that exploits intra-device parallelism, which overlaps the usage of heterogeneous resources within a single device. NanoFlow splits inputs into smaller nano-batches and duplicates operations to operate on each portion independently, enabling overlapping. NanoFlow automatically identifies the number, size, ordering, and GPU resource allocation of nano-batches to minimize the execution time, while considering the interference of concurrent operations. We evaluate NanoFlow's end-to-end serving throughput on several popular models such as LLaMA-2-70B, Mixtral 8\texttimes{}7B, LLaMA-3-8B, etc. With practical workloads, NanoFlow provides 1.91\texttimes{} throughput boost compared to state-of-the-art serving systems, achieving between 50\% to 72\% of optimal throughput across popular models.},
+booktitle = {Proceedings of the 19th USENIX Conference on Operating Systems Design and Implementation},
+articleno = {41},
+numpages = {17},
+location = {Boston, MA, USA},
+series = {OSDI '25}
+}
+
+@inproceedings{triton,
+author = {Tillet, Philippe and Kung, H. T. and Cox, David},
+title = {Triton: an intermediate language and compiler for tiled neural network computations},
+year = {2019},
+isbn = {9781450367196},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3315508.3329973},
+doi = {10.1145/3315508.3329973},
+abstract = {The validation and deployment of novel research ideas in the field of Deep Learning is often limited by the availability of efficient compute kernels for certain basic primitives. In particular, operations that cannot leverage existing vendor libraries (e.g., cuBLAS, cuDNN) are at risk of facing poor device utilization unless custom implementations are written by experts – usually at the expense of portability. For this reason, the development of new programming abstractions for specifying custom Deep Learning workloads at a minimal performance cost has become crucial. We present Triton, a language and compiler centered around the concept of tile, i.e., statically shaped multi-dimensional sub-arrays. Our approach revolves around (1) a C-based language and an LLVM-based intermediate representation (IR) for expressing tensor programs in terms of operations on parametric tile variables and (2) a set of novel tile-level optimization passes for compiling these programs into efficient GPU code. We demonstrate how Triton can be used to build portable implementations of matrix multiplication and convolution kernels on par with hand-tuned vendor libraries (cuBLAS / cuDNN), or for efficiently implementing recent research ideas such as shift convolutions.},
+booktitle = {Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages},
+pages = {10–19},
+numpages = {10},
+keywords = {GPU, compiler, neural networks},
+location = {Phoenix, AZ, USA},
+series = {MAPL 2019}
+}
+
+@misc{xla,
+  author       = {{Google}},
+  title        = {{XLA}: {Accelerated} Linear Algebra},
+  year         = {2026},
+  howpublished = {\url{https://openxla.org/xla}},
+  note         = {OpenXLA Project}
+}
+
+@inproceedings{10.1109/SC41406.2024.00094,
+author = {Punniyamurthy, Kishore and Hamidouche, Khaled and Beckmann, Bradford M.},
+title = {Optimizing Distributed ML Communication with Fused Computation-Collective Operations},
+year = {2024},
+isbn = {9798350352917},
+publisher = {IEEE Press},
+url = {https://doi.org/10.1109/SC41406.2024.00094},
+doi = {10.1109/SC41406.2024.00094},
+abstract = {Machine learning models are distributed across multiple nodes using numerous parallelism strategies. The resulting collective communication is often on the critical path due to a lack of independent coarse-grain computation kernels available to execute.In this work, we propose fusing computation with its subsequent collective communication and leverage GPUs' massive parallelism, along with GPU-initiated communication, to overlap communication and computation. Specifically thread-blocks/workgroups (WGs) immediately communicate their results to remote GPUs after completing their computation,while other WGs within the same kernel perform computation. We developed three prototype fused operators (embedding+All-to-All, GEMV+AllReduce, and GEMM+All-to-All) to address the communication overheads in DLRM, Transformers and MoE model architectures. We expose fused kernels as new PyTorch operators, as well as extend the Triton framework to demonstrate their practicality. Our evaluations show our approach effectively overlaps communication with computations, subsequently reducing their combined execution time achieving 12\% - 31\% lower execution time across all three operators.},
+booktitle = {Proceedings of the International Conference for High Performance Computing, Networking, Storage, and Analysis},
+articleno = {88},
+numpages = {17},
+keywords = {Collective communication, DLRM, GPU, MoE, Transformers, distributed ML},
+location = {Atlanta, GA, USA},
+series = {SC '24}
+}
+
+@INPROCEEDINGS{astra-sim-2,
+  author={Won, William and Heo, Taekyung and Rashidi, Saeed and Sridharan, Srinivas and Srinivasan, Sudarshan and Krishna, Tushar},
+  booktitle={2023 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)}, 
+  title={ASTRA-sim2.0: Modeling Hierarchical Networks and Disaggregated Systems for Large-model Training at Scale}, 
+  year={2023},
+  volume={},
+  number={},
+  pages={283-294},
+  keywords={Training;Semiconductor device modeling;Analytical models;Network topology;Systems modeling;Throughput;Data models;Distributed training;High-performance training;Multi-dimensional network;Disaggregated memory system},
+  doi={10.1109/ISPASS57527.2023.00035}}
+
+@INPROCEEDINGS{astrasim,
+  author={Rashidi, Saeed and Sridharan, Srinivas and Srinivasan, Sudarshan and Krishna, Tushar},
+  booktitle={2020 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS)}, 
+  title={ASTRA-SIM: Enabling SW/HW Co-Design Exploration for Distributed DL Training Platforms}, 
+  year={2020},
+  volume={},
+  number={},
+  pages={81-92},
+  keywords={Training;Technological innovation;Navigation;Network topology;Software algorithms;Software;Scheduling;Distributed training;Collective communication;Training parallelism;High performance training systems},
+  doi={10.1109/ISPASS48437.2020.00018}}
+
+@inproceedings{10.1145/3651890.3672233,
+author = {Gangidi, Adithya and Miao, Rui and Zheng, Shengbao and Bondu, Sai Jayesh and Goes, Guilherme and Morsy, Hany and Puri, Rohit and Riftadi, Mohammad and Shetty, Ashmitha Jeevaraj and Yang, Jingyi and Zhang, Shuqiang and Fernandez, Mikel Jimenez and Gandham, Shashidhar and Zeng, Hongyi},
+title = {RDMA over Ethernet for Distributed Training at Meta Scale},
+year = {2024},
+isbn = {9798400706141},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3651890.3672233},
+doi = {10.1145/3651890.3672233},
+abstract = {The rapid growth in both computational density and scale in AI models in recent years motivates the construction of an efficient and reliable dedicated network infrastructure. This paper presents the design, implementation, and operation of Meta's Remote Direct Memory Access over Converged Ethernet (RoCE) networks for distributed AI training.Our design principles involve a deep understanding of the workloads, and we translated these insights into the design of various network components: Network Topology - To support the rapid evolution of generations of AI hardware platforms, we separated GPU-based training into its own "backend" network. Routing - Training workloads inherently impose load imbalance and burstiness, so we deployed several iterations of routing schemes to achieve near-optimal traffic distribution. Transport - We outline how we initially attempted to use DCQCN for congestion management but then pivoted away from DCQCN to instead leverage the collective library itself to manage congestion. Operations - We share our experience operating large-scale AI networks, including toolings we developed and troubleshooting examples.},
+booktitle = {Proceedings of the ACM SIGCOMM 2024 Conference},
+pages = {57–70},
+numpages = {14},
+keywords = {RDMA, distributed training},
+location = {Sydney, NSW, Australia},
+series = {ACM SIGCOMM '24}
+}
+
+@inproceedings {autotvm,
+author = {Tianqi Chen and Thierry Moreau and Ziheng Jiang and Lianmin Zheng and Eddie Yan and Haichen Shen and Meghan Cowan and Leyuan Wang and Yuwei Hu and Luis Ceze and Carlos Guestrin and Arvind Krishnamurthy},
+title = {{TVM}: An Automated {End-to-End} Optimizing Compiler for Deep Learning},
+booktitle = {13th USENIX Symposium on Operating Systems Design and Implementation (OSDI 18)},
+year = {2018},
+isbn = {978-1-939133-08-3},
+address = {Carlsbad, CA},
+pages = {578--594},
+url = {https://www.usenix.org/conference/osdi18/presentation/chen},
+publisher = {USENIX Association},
+month = oct
+}
+
+@inproceedings {ansor,
+author = {Lianmin Zheng and Chengfan Jia and Minmin Sun and Zhao Wu and Cody Hao Yu and Ameer Haj-Ali and Yida Wang and Jun Yang and Danyang Zhuo and Koushik Sen and Joseph E. Gonzalez and Ion Stoica},
+title = {Ansor: Generating {High-Performance} Tensor Programs for Deep Learning},
+booktitle = {14th USENIX Symposium on Operating Systems Design and Implementation (OSDI 20)},
+year = {2020},
+isbn = {978-1-939133-19-9},
+pages = {863--879},
+url = {https://www.usenix.org/conference/osdi20/presentation/zheng},
+publisher = {USENIX Association},
+month = nov
+}
+
+@misc{zheng2025tritondistributed,
+      title={Triton-distributed: Programming Overlapping Kernels on Distributed AI Systems with the Triton Compiler},
+      author={Size Zheng and Wenlei Bao and Qi Hou and Xuegui Zheng and Jin Fang and Chenhui Huang and Tianqi Li and Haojie Duanmu and Renze Chen and Ruifan Xu and Yifan Guo and Ningxin Zheng and Ziheng Jiang and Xinyi Di and Dongyang Wang and Jianxi Ye and Haibin Lin and Li-Wen Chang and Liqiang Lu and Yun Liang and Jidong Zhai and Xin Liu},
+      year={2025},
+      eprint={2504.19442},
+      archivePrefix={arXiv},
+      primaryClass={cs.DC},
+      url={https://arxiv.org/abs/2504.19442},
+}
+
+@inproceedings{10.5555/3600270.3601459,
+author = {Dao, Tri and Fu, Daniel Y. and Ermon, Stefano and Rudra, Atri and R\'{e}, Christopher},
+title = {FLASHATTENTION: fast and memory-efficient exact attention with IO-awareness},
+year = {2022},
+isbn = {9781713871088},
+publisher = {Curran Associates Inc.},
+address = {Red Hook, NY, USA},
+abstract = {Transformers are slow and memory-hungry on long sequences, since the time and memory complexity of self-attention are quadratic in sequence length. Approximate attention methods have attempted to address this problem by trading off model quality to reduce the compute complexity, but often do not achieve wall-clock speedup. We argue that a missing principle is making attention algorithms IO-aware— accounting for reads and writes between levels of GPU memory. We propose FLASHATTENTION, an IO-aware exact attention algorithm that uses tiling to reduce the number of memory reads/writes between GPU high bandwidth memory (HBM) and GPU on-chip SRAM. We analyze the IO complexity of FLASHATTENTION, showing that it requires fewer HBM accesses than standard attention, and is optimal for a range of SRAM sizes. We also extend FLASHATTENTION to block-sparse attention, yielding an approximate attention algorithm that is faster than any existing approximate attention method. FLASHATTENTION trains Transformers faster than existing baselines: 15\% end-to-end wall-clock speedup on BERT-large (seq. length 512) compared to the MLPerf 1.1 training speed record, 3\texttimes{} speedup on GPT-2 (seq. length 1K), and 2.4\texttimes{} speedup on long-range arena (seq. length 1K-4K). FLASHATTENTION and block-sparse FLASHATTENTION enable longer context in Transformers, yielding higher quality models (0.7 better perplexity on GPT-2 and 6.4 points of lift on long-document classification) and entirely new capabilities: the first Transformers to achieve better-than-chance performance on the Path-X challenge (seq. length 16K, 61.4\% accuracy) and Path-256 (seq. length 64K, 63.1\% accuracy).},
+booktitle = {Proceedings of the 36th International Conference on Neural Information Processing Systems},
+articleno = {1189},
+numpages = {16},
+location = {New Orleans, LA, USA},
+series = {NIPS '22}
+}
+
+@misc{dao2023flashattention2fasterattentionbetter,
+      title={FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning}, 
+      author={Tri Dao},
+      year={2023},
+      eprint={2307.08691},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2307.08691}, 
+}
+
+@INPROCEEDINGS{9741270,
+  author={Li, Ao and Zheng, Bojian and Pekhimenko, Gennady and Long, Fan},
+  booktitle={2022 IEEE/ACM International Symposium on Code Generation and Optimization (CGO)}, 
+  title={Automatic Horizontal Fusion for GPU Kernels}, 
+  year={2022},
+  volume={},
+  number={},
+  pages={14-27},
+  keywords={Deep learning;Codes;Fuses;Graphics processing units;Parallel processing;Hardware;Cryptocurrency;GPGPU;Code Generation;Performance;Optimization},
+  doi={10.1109/CGO53902.2022.9741270}}
+
+@INPROCEEDINGS{wang_fusion,
+  author={Wang, Guibin and Lin, YiSong and Yi, Wei},
+  booktitle={2010 IEEE/ACM Int'l Conference on Green Computing and Communications and Int'l Conference on Cyber, Physical and Social Computing}, 
+  title={Kernel Fusion: An Effective Method for Better Power Efficiency on Multithreaded GPU}, 
+  year={2010},
+  volume={},
+  number={},
+  pages={344-350},
+  keywords={Kernel;Instruction sets;Graphics processing unit;Energy consumption;Hardware;Mathematical model;Dynamic programming;Kernel Fusion;Power Efficiency;Power Optimization;GPGPU},
+  doi={10.1109/GreenCom-CPSCom.2010.102}}
+
+@inproceedings{pytorch2,
+author = {Ansel, Jason and Yang, Edward and He, Horace and Gimelshein, Natalia and Jain, Animesh and Voznesensky, Michael and Bao, Bin and Bell, Peter and Berard, David and Burovski, Evgeni and Chauhan, Geeta and Chourdia, Anjali and Constable, Will and Desmaison, Alban and DeVito, Zachary and Ellison, Elias and Feng, Will and Gong, Jiong and Gschwind, Michael and Hirsh, Brian and Huang, Sherlock and Kalambarkar, Kshiteej and Kirsch, Laurent and Lazos, Michael and Lezcano, Mario and Liang, Yanbo and Liang, Jason and Lu, Yinghai and Luk, C. K. and Maher, Bert and Pan, Yunjie and Puhrsch, Christian and Reso, Matthias and Saroufim, Mark and Siraichi, Marcos Yukio and Suk, Helen and Zhang, Shunting and Suo, Michael and Tillet, Phil and Zhao, Xu and Wang, Eikan and Zhou, Keren and Zou, Richard and Wang, Xiaodong and Mathews, Ajit and Wen, William and Chanan, Gregory and Wu, Peng and Chintala, Soumith},
+title = {PyTorch 2: Faster Machine Learning Through Dynamic Python Bytecode Transformation and Graph Compilation},
+year = {2024},
+isbn = {9798400703850},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3620665.3640366},
+doi = {10.1145/3620665.3640366},
+abstract = {This paper introduces two extensions to the popular PyTorch machine learning framework, TorchDynamo and TorchInductor, which implement the torch.compile feature released in PyTorch 2. TorchDynamo is a Python-level just-in-time (JIT) compiler that enables graph compilation in PyTorch programs without sacrificing the flexibility of Python. It achieves this by dynamically modifying Python bytecode before execution and extracting sequences of PyTorch operations into an FX graph, which is then JIT compiled using one of many extensible backends. TorchInductor is the default compiler backend for TorchDynamo, which translates PyTorch programs into OpenAI's Triton for GPUs and C++ for CPUs. Results show that TorchDynamo is able to capture graphs more robustly than prior approaches while adding minimal overhead, and TorchInductor is able to provide a 2.27\texttimes{} inference and 1.41\texttimes{} training geometric mean speedup on an NVIDIA A100 GPU across 180+ real-world models, which outperforms six other compilers. These extensions provide a new way to apply optimizations through compilers in eager mode frameworks like PyTorch.},
+booktitle = {Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2},
+pages = {929–947},
+numpages = {19},
+location = {La Jolla, CA, USA},
+series = {ASPLOS '24}
+}
+
+@misc{snider2023operatorfusionxlaanalysis,
+      title={Operator Fusion in XLA: Analysis and Evaluation}, 
+      author={Daniel Snider and Ruofan Liang},
+      year={2023},
+      eprint={2301.13062},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2301.13062}, 
+}
+
+@inproceedings {rammer,
+author = {Lingxiao Ma and Zhiqiang Xie and Zhi Yang and Jilong Xue and Youshan Miao and Wei Cui and Wenxiang Hu and Fan Yang and Lintao Zhang and Lidong Zhou},
+title = {Rammer: Enabling Holistic Deep Learning Compiler Optimizations with {rTasks}},
+booktitle = {14th USENIX Symposium on Operating Systems Design and Implementation (OSDI 20)},
+year = {2020},
+isbn = {978-1-939133-19-9},
+pages = {881--897},
+url = {https://www.usenix.org/conference/osdi20/presentation/ma},
+publisher = {USENIX Association},
+month = nov
+}
+
+@article{hong2025flashoverlap,
+  title={Efficient and Adaptable Overlapping for Computation and Communication via Signaling and Reordering},
+  author={Ke Hong and Xiuhong Li and Minxu Liu and Qiuli Mao and Tianqi Wu and Zixiao Huang and Lufang Chen and Zhong Wang and Yichong Zhang and Zhenhua Zhu and Guohao Dai and Yu Wang},
+  journal={arXiv preprint arXiv:2504.19519},
+  year={2025}
+}
+
+@misc{wang2024dominoeliminatingcommunicationllm,
+      title={Domino: Eliminating Communication in LLM Training via Generic Tensor Slicing and Overlapping}, 
+      author={Guanhua Wang and Chengming Zhang and Zheyu Shen and Ang Li and Olatunji Ruwase},
+      year={2024},
+      eprint={2409.15241},
+      archivePrefix={arXiv},
+      primaryClass={cs.DC},
+      url={https://arxiv.org/abs/2409.15241}, 
+}
+
+@INPROCEEDINGS{9499904,
+  author={Rashidi, Saeed and Denton, Matthew and Sridharan, Srinivas and Srinivasan, Sudarshan and Suresh, Amoghavarsha and Nie, Jade and Krishna, Tushar},
+  booktitle={2021 ACM/IEEE 48th Annual International Symposium on Computer Architecture (ISCA)}, 
+  title={Enabling Compute-Communication Overlap in Distributed Deep Learning Training Platforms}, 
+  year={2021},
+  volume={},
+  number={},
+  pages={540-553},
+  keywords={Training;Deep learning;Computational modeling;Memory management;Bandwidth;Fabrics;Computational efficiency;communication accelerator;accelerator fabric;deep learning training;collective communication},
+  doi={10.1109/ISCA52012.2021.00049}}
+
+@article{megatron-lm,
+  title={Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism},
+  author={Shoeybi, Mohammad and Patwary, Mostofa and Puri, Raul and LeGresley, Patrick and Casper, Jared and Catanzaro, Bryan},
+  journal={arXiv preprint arXiv:1909.08053},
+  year={2019}
+}
+
+@misc{concur,
+      title={ConCuR: Conciseness Makes State-of-the-Art Kernel Generation}, 
+      author={Lingcheng Kong and Jiateng Wei and Hanzhang Shen and Huan Wang},
+      year={2025},
+      eprint={2510.07356},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2510.07356}, 
+}
+
+@misc{cudaforge,
+      title={CudaForge: An Agent Framework with Hardware Feedback for CUDA Kernel Optimization}, 
+      author={Zijian Zhang and Rong Wang and Shiyang Li and Yuebo Luo and Mingyi Hong and Caiwen Ding},
+      year={2025},
+      eprint={2511.01884},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2511.01884}, 
+}
+
+@misc{evoengineer,
+      title={EvoEngineer: Mastering Automated CUDA Kernel Code Evolution with Large Language Models}, 
+      author={Ping Guo and Chenyu Zhu and Siyuan Chen and Fei Liu and Xi Lin and Zhichao Lu and Qingfu Zhang},
+      year={2025},
+      eprint={2510.03760},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2510.03760}, 
+}
+
+@misc{kevin,
+      title={Kevin: Multi-Turn RL for Generating CUDA Kernels}, 
+      author={Carlo Baronio and Pietro Marsella and Ben Pan and Simon Guo and Silas Alberti},
+      year={2025},
+      eprint={2507.11948},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2507.11948}, 
+}
+
+@misc{ouyang2025kernelbenchllmswriteefficient,
+      title={KernelBench: Can LLMs Write Efficient GPU Kernels?}, 
+      author={Anne Ouyang and Simon Guo and Simran Arora and Alex L. Zhang and William Hu and Christopher Ré and Azalia Mirhoseini},
+      year={2025},
+      eprint={2502.10517},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2502.10517}, 
+}
+
+@misc{liao2026kernelevolvescalingagentickernel,
+      title={KernelEvolve: Scaling Agentic Kernel Coding for Heterogeneous AI Accelerators at Meta}, 
+      author={Gang Liao and Hongsen Qin and Ying Wang and Alicia Golden and Michael Kuchnik and Yavuz Yetim and Jia Jiunn Ang and Chunli Fu and Yihan He and Samuel Hsia and Zewei Jiang and Dianshi Li and Uladzimir Pashkevich and Varna Puvvada and Feng Shi and Matt Steiner and Ruichao Xiao and Nathan Yan and Xiayu Yu and Zhou Fang and Roman Levenstein and Kunming Ho and Haishan Zhu and Alec Hammond and Richard Li and Ajit Mathews and Kaustubh Gondkar and Abdul Zainul-Abedin and Ketan Singh and Hongtao Yu and Wenyuan Chi and Barney Huang and Sean Zhang and Noah Weller and Zach Marine and Wyatt Cook and Carole-Jean Wu and Gaoxiang Liu},
+      year={2026},
+      eprint={2512.23236},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2512.23236}, 
+}
+
+@misc{li2026cudal1improvingcudaoptimization,
+      title={CUDA-L1: Improving CUDA Optimization via Contrastive Reinforcement Learning}, 
+      author={Xiaoya Li and Xiaofei Sun and Albert Wang and Jiwei Li and Chris Shum},
+      year={2026},
+      eprint={2507.14111},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2507.14111}, 
+}
+
+@misc{lange2025robustagenticcudakernel,
+      title={Towards Robust Agentic CUDA Kernel Benchmarking, Verification, and Optimization}, 
+      author={Robert Tjarko Lange and Qi Sun and Aaditya Prasad and Maxence Faldor and Yujin Tang and David Ha},
+      year={2025},
+      eprint={2509.14279},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2509.14279}, 
+}
+
+@misc{wei2025astramultiagentgpukernel,
+      title={Astra: A Multi-Agent System for GPU Kernel Performance Optimization}, 
+      author={Anjiang Wei and Tianran Sun and Yogesh Seenichamy and Hang Song and Anne Ouyang and Azalia Mirhoseini and Ke Wang and Alex Aiken},
+      year={2025},
+      eprint={2509.07506},
+      archivePrefix={arXiv},
+      primaryClass={cs.DC},
+      url={https://arxiv.org/abs/2509.07506}, 
+}
+
+@misc{dong2025starkstrategicteamagents,
+      title={STARK: Strategic Team of Agents for Refining Kernels}, 
+      author={Juncheng Dong and Yang Yang and Tao Liu and Yang Wang and Feng Qi and Vahid Tarokh and Kaushik Rangadurai and Shuang Yang},
+      year={2025},
+      eprint={2510.16996},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2510.16996}, 
+}
+
+@misc{kernelfalcon,
+  title        = {{KernelFalcon}: Autonomous {GPU} Kernel Generation via Deep Agents},
+  author       = {Wang, Laura and Chen, Sijia and Maher, Bert and Isaacson, Joe and
+                  Fang, Lu and Chi, Wenyuan and Liu, Jie and Hammond, Alec and
+                  Fisches, Zacharias and Saroufim, Mark and Hunt, Warren and
+                  Li, Richard and Kahn, Jacob and El-Haraty, Emad and
+                  Mathews, Ajit and {the PyTorch Team at Meta}},
+  howpublished = {PyTorch Blog},
+  month        = nov,
+  year         = {2025},
+  url          = {https://pytorch.org/blog/kernelfalcon-autonomous-gpu-kernel-generation-via-deep-agents/},
+}
+
+
+@misc{lange2025shinkaevolveopenendedsampleefficientprogram,
+      title={ShinkaEvolve: Towards Open-Ended And Sample-Efficient Program Evolution}, 
+      author={Robert Tjarko Lange and Yuki Imajuku and Edoardo Cetin},
+      year={2025},
+      eprint={2509.19349},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2509.19349}, 
+}

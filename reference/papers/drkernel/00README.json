@@ -1,0 +1,61 @@
+{
+   "sources" : [
+      {
+         "usage" : "toplevel",
+         "filename" : "colm2026_conference.tex"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "README.md"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "appendices/training_prompt.pdf"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "colm2026_conference.bbl"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "colm2026_conference.bib"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "colm2026_conference.bst"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "figures/case_study/Profiling_Better_Fusion.pdf"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "figures/case_study/Profiling_Lazy_Optimization.pdf"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "figures/combined.pdf"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "figures/tradeoff_fast1_vs_fast12.pdf"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "figures/training_dynamics.pdf"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "math_commands.tex"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "sections/relatedwork.tex"
+      }
+   ],
+   "spec_version" : 1,
+   "texlive_version" : "2025",
+   "process" : {
+      "compiler" : "pdflatex"
+   }
+}

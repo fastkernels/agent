@@ -1,0 +1,59 @@
+template <typename T>
+__global__ void HybridAlltoAllKernel(ncclWindow_t sendwin,
+  size_t sendoffset, ncclWindow_t recvwin,
+  size_t recvoffset, size_t count, int root,
+  struct ncclDevComm devComm) {
+  // 1. Initialize GIN context
+  int ginContext = 0; // GIN context index
+  unsigned int signalIndex = 0; // Signal slot
+  ncclGin gin {devComm, ginContext};
+  uint64_t signalValue = gin.readSignal(signalIndex);
+
+  // 2. Cross-GPU synchronization before data exchange
+  ncclBarrierSession<ncclCoopCta> bar {ncclCoopCta(),
+    ncclTeamTagWorld(), gin, blockIdx.x};
+  bar.sync(ncclCoopCta(), cuda::memory_order_relaxed,
+    ncclGinFenceLevel::Relaxed);
+
+  int tid = threadIdx.x + blockIdx.x * blockDim.x;
+  int nthreads = blockDim.x * gridDim.x;
+
+  // 3. Determine local (LSA) vs remote peers (GIN)
+  ncclTeam world = ncclTeamWorld(devComm); // All ranks
+  ncclTeam lsa = ncclTeamLsa(devComm); // Same-node ranks
+  const int startLsa = world.rank - lsa.rank;
+  const int lsaSize = lsa.nRanks;
+
+  // 4. Send to remote peers via GIN (cross-node)
+  const size_t size = count * sizeof(T);
+  // Remote peers before LSA range
+  for (int r=tid; r<startLsa; r+=nthreads) {
+    gin.put(world, r, recvwin, recvoffset+world.rank*size,
+      sendwin, sendoffset+r*size, size, ncclGin_SignalInc{signalIndex});
+  }
+  // Remote peers after LSA range
+  for (int r=startLsa+lsaSize+tid; r<world.nRanks; r+=nthreads) {
+    gin.put(world, r, recvwin,
+      recvoffset+world.rank*size, sendwin, sendoffset+r*size,
+      size, ncclGin_SignalInc{signalIndex});
+  }
+
+  // 5. Send to local peers via direct memory access (LSA)
+  T* sendLocal = (T*)ncclGetLocalPointer(sendwin, sendoffset);
+  for (size_t offset=tid; offset<count; offset+=nthreads) {
+    for (int lp = 0; lp < lsa.nRanks; lp++) {
+      int wr = startLsa + lp;
+      T* recvPtr = (T*)ncclGetLsaPointer(recvwin, recvoffset, lp);
+      recvPtr[world.rank*count+offset] = sendLocal[wr*count+offset];
+    }
+  }
+
+  // 6. Wait for remote GIN operations to complete
+  int numRemotePeers = world.nRanks - lsa.nRanks;
+  gin.waitSignal(ncclCoopCta(), signalIndex, signalValue+numRemotePeers);
+  gin.flush(ncclCoopCta());
+
+  // 7. Final barrier to ensure all data is visible
+  bar.sync(ncclCoopCta(), cuda::memory_order_release,
+    ncclGinFenceLevel::Relaxed);
+}

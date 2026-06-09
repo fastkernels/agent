@@ -1,0 +1,95 @@
+\vspace{-10pt}
+\section{CUCo}
+\vspace{-10pt}
+\noindent
+{\bf Goals and Overview.}
+\cufuse{} is an end-to-end agentic framework for generating fused compute-communication CUDA kernels (Figure~\ref{fig:workflow}). Why not simply prompt an LLM iteratively? Compute-communication co-design requires jointly resolving multiple interacting decisions---backend selection, synchronization strategy, overlap placement, issuer granularity---whose correctness constraints are subtle and topology-dependent. Without structured guidance, LLMs default to unconstrained code generation that either deadlocks at runtime or converges to local optima that leave performance on the table. Our ablations (Section~\ref{sec:ablation}) confirm this: naive iterative prompting yields only marginal improvements on the host baselines, while skipping a correctness-first stage wastes the search budget on broken candidates. These observations motivate the three components below:
+
+(i)~\emph{Design space specification}---a structured configuration space $\mathcal{C}$ so agents reason over device-initiated communication and overlap using minimal user-specified detail rather than unconstrained code generation;
+(ii)~\emph{Fast-path agent}---correctness-first transformation from host-driven baselines to verified device-initiated kernels across backends and schedules;
+(iii)~\emph{Slow-path agent}---performance-driven search over overlap strategies, pipelining, and placement within $\mathcal{C}$ to discover high-performance kernels.
+
+\vspace{-10pt}
+\subsection{Design Space Specification}
+\vspace{-8pt}
+\label{subsec:design_space}
+
+Transitioning communication into the kernel shifts the paradigm from lockstep host-driven collectives to thread-driven device-initiated transfers. This introduces a complex configuration problem across multiple interacting dimensions. Without explicit guidance, an LLM agent makes these decisions implicitly from training priors, often producing suboptimal or incorrect kernels (our ablation in Section~\ref{sec:ablation} confirms this).
+
+To prevent this, \cufuse{} formalizes an \emph{optimization configuration space}, defined by eight discrete dimensions: $\mathcal{C} = \mathcal{B} \times \mathcal{M} \times \mathcal{P} \times \mathcal{S} \times \mathcal{I} \times \mathcal{G} \times \mathcal{O} \times \mathcal{K}$, representing backend ($\mathcal{B}$), completion mechanism ($\mathcal{M}$), placement ($\mathcal{P}$), synchronization scope ($\mathcal{S}$), issuer granularity ($\mathcal{I}$), chunk size ($\mathcal{G}$), memory ordering ($\mathcal{O}$), and context multiplicity ($\mathcal{K}$). These dimensions capture the dominant degrees of freedom for compute-communication co-design, as evidenced by their ability to express existing expert-crafted systems (Table~\ref{tab:design_space_coverage}). While some parameters dictate raw transport ($\mathcal{B}$), others expose subtle architectural trade-offs. For instance, the synchronization mechanism ($\mathcal{M}$) dictates how completion is detected: barriers impose global rendezvous, whereas signals enable point-to-point polling for tighter overlap but introduce race-condition risks. Similarly, communication placement ($\mathcal{P}$) determines whether transfers are deferred, tile-fused within a persistent kernel, or pipelined across streams. The best choice is highly topology-dependent: a synchronization scope ($\mathcal{S}$) of \texttt{World} may be required across slower inter-node links, whereas \texttt{Local} or \texttt{Rail} scopes dominate on dense fabrics (GIN issues RDMA puts over the network; LSA performs direct load/store to peer memory over NVLink). Table~\ref{tab:fusion_space} and Table~\ref{tab:design_space_coverage} detail this space and demonstrate how expert-crafted systems map onto these axes (see Appendix~\ref{sec:design_space_details} for a full semantic breakdown).
+
+\begin{table}[t]
+\centering
+\scriptsize
+\caption{Optimization directive dimensions. Concrete dimensions correspond to fixed NCCL API identifiers. Intent-based dimensions express high-level objectives that the agent interprets during code generation.}
+\begin{tabular}{p{0.3\columnwidth} p{0.65\columnwidth}}
+\toprule
+\textbf{Concrete API Dimensions} & \textbf{Allowed Values} \\
+\midrule
+$\mathcal{B}$: Backend     & \texttt{GIN} \;|\; \texttt{LSA} \;|\; \texttt{Hybrid} \\
+$\mathcal{M}$: Sync Mechanism & \texttt{Barrier} \;|\; \texttt{Signal} \;|\; \texttt{SignalShadow} \;|\; \texttt{Counter} \\
+$\mathcal{I}$: Issuer      & \texttt{Thread} \;|\; \texttt{Warp} \;|\; \texttt{WarpSpan} \;|\; \texttt{Tile\textlangle N\textrangle} \;|\; \texttt{CTA} \\
+$\mathcal{O}$: Ordering    & \texttt{Relaxed} \;|\; \texttt{Acquire} \;|\; \texttt{Release} \;|\; \texttt{AcqRel} \\
+$\mathcal{K}$: Contexts    & $1$ \;|\; $2$ \;|\; $N$ \\
+\midrule
+\textbf{Intent-Based Dimensions} & \textbf{Allowed Values} \\
+\midrule
+$\mathcal{P}$: Placement     & Deferred \;|\; Tile-fused \;|\; Tile-pipelined \;|\; Stream-split \\
+$\mathcal{S}$: Sync Scope    & Local \;|\; World \;|\; Rail \;|\; Hierarchical \\
+$\mathcal{G}$: Granularity   & Per-peer \;|\; Per-tile \;|\; Per-chunk \\
+\bottomrule
+\end{tabular}
+\label{tab:fusion_space}
+\vspace{-10pt}
+\end{table}
+
+\begin{table}[t]
+\centering
+\scriptsize
+\caption{Expert-crafted systems mapped onto the design space $\mathcal{C}$ by semantic equivalence. These systems use custom transport implementations, not NCCL's device API. DeepEP's IB path uses custom RDMA one-sided puts (GIN semantics); its NVLink path uses direct peer memory stores (LSA semantics).}
+\label{tab:design_space_coverage}
+\begin{tabular}{lcccccccc}
+\toprule
+\textbf{System} & $\mathcal{B}$ & $\mathcal{M}$ & $\mathcal{P}$ & $\mathcal{S}$ & $\mathcal{I}$ & $\mathcal{G}$ & $\mathcal{O}$ & $\mathcal{K}$ \\
+\midrule
+DeepEP (NVL)  & LSA    & Barrier      & Deferred       & Local & CTA  & Per-peer & Release & -- \\
+DeepEP (IB)   & GIN    & Signal       & Deferred       & World & CTA  & Per-peer & Acquire & 1 \\
+FLUX          & LSA    & Barrier      & Tile-fused     & Local & Warp & Per-tile & AcqRel  & -- \\
+\bottomrule
+\end{tabular}
+\vspace{-25pt}
+\end{table}
+
+\noindent\textbf{Optimization Directive.}
+To use $\mathcal{C}$ as an agent reasoning interface, \cufuse{} requires each agent to emit an explicit \emph{optimization directive} before generating any kernel code. The directive selects one value per dimension of $\mathcal{C}$ (Appendix~\ref{sec:directive_listing}). The fast-path agent always emits a fixed conservative directive (CTA issuance, barrier completion, world scope, release ordering, single context). The slow-path agent treats the directive as the search variable, reasoning over $\mathcal{C}$ to emit progressively more aggressive configurations for a given workload and hardware target. By requiring an explicit directive before any code is written, \cufuse{} makes each agent's design decisions inspectable and directly traceable to the kernels they produce.
+% \vspace{-3pt}
+\noindent\textbf{Agent Context.}
+General-purpose LLMs have almost no exposure to NCCL's device-initiated API: it is recent, sparsely documented, and heavily conflated with host-driven semantics in the LLM's pretraining data. To prevent hallucinated API calls, \cufuse{} dynamically injects a structured context into the prompt, \emph{strictly conditioned on the selected backend} $\mathcal{B}$ (e.g., if GIN is selected, only GIN documentation is injected; LSA material is omitted entirely). The context comprises three components:
+(1)~\emph{API Documentation}: Schema-driven interface specs, semantic preconditions, and a compilable reference kernel.
+(2)~\emph{Strategy Knowledge}: Best-practice overlap strategies (kernel-level fusion vs.\ multi-stream pipelining) alongside backend-specific correctness rules to constrain the search space of plausible-but-incorrect programs.
+(3)~\emph{Hardware Context}: Dynamically extracted GPU properties, network topologies, and SM resource limits, ensuring that agent decisions reflect the target hardware rather than training priors.
+Full details of the agent context, including an LSA interface sample, are provided in Appendix~\ref{sec:agent_context}.
+
+\vspace{-10pt}
+\subsection{Fast-Path Agent}
+\vspace{-8pt}
+\label{fast_path}
+The fast‑path agent is dedicated entirely to producing a correct device-initiated baseline, prioritizing functional verification over performance (Figure~\ref{fig:workflow}). Attempting to generate a fully optimized kernel from scratch leads to high failure rates (our ablation shows $>$25\% of the evolution budget wasted on broken candidates that fail compilation or deadlock). Instead, \cufuse{} utilizes a three-step correctness-first pipeline: (1)~\emph{CUDA Code Analysis}: A static analyzer extracts the communication dependency graph from the host-driven baseline, recovering the precise compute--communication boundary (Appendix~\ref{app:analysis_example}). (2)~\emph{Host-to-Device Transformation}: The agent uses a two-stage LLM--judge feedback loop to rewrite host collectives into device-initiated equivalents. \emph{Stage~A} sets up the device-communication infrastructure (symmetric memory allocation, window registration, device communicator instantiation). \emph{Stage~B} replaces host collectives with device primitives (\texttt{put}/\texttt{waitSignal} for GIN; peer stores with barrier synchronization for LSA) using the fixed conservative directive described above to ensure deterministic execution. (3)~\emph{Evolve-Block Annotation}: The verified program is annotated with paired markers identifying mutable regions. Frozen regions (initialization, verification) are excluded to prevent downstream mutations from breaking the evaluation harness.
+
+Separating infrastructure setup from semantic replacement isolates LLM generation tasks, reducing the failure space and allowing the LLM judge to provide targeted feedback on compilation and logic errors. The resulting verified program becomes the \emph{seed} for the slow-path agent. Full details of the fast-path transformation are provided in Appendix~\ref{sec:fast_path_details}.
+
+
+\vspace{-10pt}
+\subsection{Slow-Path Agent}
+\vspace{-10pt}
+\label{subsec:slow_path}
+
+
+The slow‑path agent navigates the search space $\mathcal{C}$ using an island‑based evolutionary optimizer augmented with an LLM mutation operator (Appendix~\ref{sec:slowpath_algo}). Unlike standard genetic algorithms where random perturbation ruins code validity, \cufuse{} uses an LLM to propose semantically informed edits bounded by the directive space $\mathcal{C}$ and spatial \texttt{evolve-block} markers. The framework explicitly schedules exploration vs.\ exploitation through a phase-dependent mutation policy (Appendix~\ref{sec:llmmutate_details}) and prevents premature convergence by evolving multiple independent islands~\cite{lange2025shinkaevolveopenendedsampleefficientprogram} that periodically exchange high-scoring candidates (Appendix~\ref{sec:multi-island}).
+
+\noindent\textbf{Explore-Exploit Mutation Policy.} The search relies on three LLM mutation modes: \emph{full rewrites} (large-step architectural changes), \emph{diff patches} (fine-grained parameter tuning), and \emph{cross-pollination} (crossover synthesis from a MAP-Elites~\cite{mapelites} archive). Because exhaustive exploration is wasteful, \cufuse{} explicitly schedules these three mutation modes. The \emph{Explore phase} favors high-temperature full rewrites to discover diverse baseline architectures (e.g., fused kernels vs.\ multi-stream pipelining) before any single design dominates. The \emph{Exploit phase} transitions to low-temperature diff patches, greedily refining synchronization scopes, launch bounds, and memory orderings of the most promising candidates.
+
+\noindent\textbf{Cascade Evaluation \& Feedback Routing.}
+Every generated offspring undergoes a fast-fail three-level evaluation cascade: compile ($\ell_1$), numerically verify via \texttt{mpirun} ($\ell_2$), and benchmark latency ($\ell_3$). Results are scored and persisted in an embedding-guided Candidate Database. A specialized LLM feedback agent analyzes each termination trace (compiler errors, mismatches, or performance metrics) and generates a diagnostic. When selecting the next parent for mutation, the prompt is populated with: (1)~\emph{Parent history} (source code, metrics, and targeted feedback), (2)~\emph{Structurally similar peers} (retrieved via code embeddings as negative examples to prune failed paths), and (3)~\emph{Meta-recommendations} (cross-generation strategic trends from a meta-summarizer, Appendix~\ref{sec:meta}). This closed-loop feedback drives continuous improvement across generations.
+
+\par

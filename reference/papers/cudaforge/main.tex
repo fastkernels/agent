@@ -1,0 +1,243 @@
+\UseRawInputEncoding
+\documentclass[11pt]{article}
+\usepackage[top=1in, bottom=1in, left=1in, right=1in]{geometry}
+
+\newcommand{\agentname}{\texttt{CudaForge}}
+    \PassOptionsToPackage{numbers, compress,sort}{natbib}
+
+
+\usepackage[most]{tcolorbox} 
+\usepackage{listings}
+\usepackage[T1]{fontenc}
+\usepackage{inconsolata} 
+
+
+\lstdefinestyle{nice}{
+  basicstyle=\ttfamily\small,
+  numbers=left,
+  numberstyle=\scriptsize\color{blue},
+  numbersep=8pt,
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+  tabsize=2,
+  keepspaces=true,
+  upquote=true,
+  keywordstyle=\bfseries,
+  commentstyle=\itshape,
+}
+
+\tcbset{
+  mybox/.style={
+    enhanced,
+    breakable,
+    colback=blue!4,             
+    colframe=blue!65!black,     
+    colbacktitle=blue!70!black,
+    coltitle=white,            
+    fonttitle=\bfseries,        
+    boxrule=0.8pt,
+    arc=2mm,
+    left=2mm, right=2mm, top=1mm, bottom=1mm,
+    title style={font=\bfseries},
+  },
+    redbox/.style={
+    enhanced,
+    breakable,
+    colback=red!5,
+    colframe=red!70!black,
+    colbacktitle=red!75!black,
+    coltitle=white,
+    fonttitle=\bfseries,
+    boxrule=0.8pt,
+    arc=2mm,
+    left=2mm, right=2mm, top=1mm, bottom=1mm,
+    title style={font=\bfseries},
+  }
+}
+
+\newcommand{\Metric}[1]{\texttt{\seqsplit{#1}}}
+\usepackage{pgfplots}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{amssymb}
+\usepackage{siunitx}
+\sisetup{
+  table-number-alignment = center,
+  table-figures-integer = 3,
+  table-figures-decimal = 2,
+  detect-weight = true,
+  detect-inline-weight = math
+}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\usepackage{wrapfig}   
+
+\setlength{\intextsep}{6pt}     
+\setlength{\columnsep}{10pt} 
+\usepackage{booktabs,longtable, array} 
+\usepackage{siunitx}                  
+\usepackage{seqsplit}                 
+\usepackage{pdflscape}   
+\usepackage[utf8]{inputenc}
+
+
+
+
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{natbib}[numbers,sort,compress]
+\usepackage[ruled]{algorithm2e}
+
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{xcolor}         % colors
+\usepackage{subcaption}
+
+\input{Utils/mysymbols}
+\input{Utils/math_utils}
+
+\everydisplay{\small}
+
+\title{
+CudaForge: An Agent Framework with Hardware Feedback for CUDA Kernel Optimization
+}
+
+\author{%
+  \large
+  Zijian Zhang\thanks{Co-first author. Equal contribution; order decided by a coin toss.}\quad
+  Rong Wang\footnotemark[1]\quad
+  Shiyang Li\quad
+  Yuebo Luo\\[0.3cm]
+  Mingyi Hong\thanks{Corresponding author.}\quad
+  Caiwen Ding\footnotemark[2]\\[0.8em]
+  \normalsize University of Minnesota, Twin Cities\\[0.3em]
+  \texttt{\{zha00175, wan00559, li004074, luo00466, mhong, dingc\}@umn.edu}%
+}
+
+\usetikzlibrary{shapes.geometric}
+
+\date{}
+\begin{document}
+\maketitle
+
+\input{sections/abstract}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.9\linewidth,
+  height=0.6\linewidth,
+  xlabel={Correctness (\%)},
+  ylabel={Performance (× Speedup)},
+  xmin=55, xmax=104.9,
+  ymin=0.6, ymax=2.35,
+  grid=both,
+  grid style={dashed,gray!20},
+  legend style={at={(0.02,0.98)},anchor=north west,font=\small,fill=white,draw=gray!40},
+  every axis plot/.append style={thick}
+]
+
+
+\addplot[red!60!white,mark=none,dashed] coordinates {
+  (90.8,1.107)
+  (97.6,1.677)
+};
+\addlegendentry{w/o Judge}
+
+
+\addplot[pink,mark=none,dashed] coordinates {
+  (88.4,1.509)
+  (97.6,1.677)
+};
+\addlegendentry{w/o correction feedback}
+
+\addplot[purple,mark=none,dashed] coordinates {
+  (97.6,1.222)
+  (97.6,1.677)
+};
+\addlegendentry{w/o optimization feedback}
+\addlegendimage{only marks,mark=x,mark size=3pt,black}
+\addlegendentry{Evaluated on Level 1–2}
+
+\addlegendimage{only marks,mark=*,mark size=2.2pt,black}
+\addlegendentry{Evaluated on Level 1–3}
+
+\addplot[only marks,mark=x,mark size=3pt,very thick,orange] coordinates {(82.0,1.10)};
+\addplot[only marks,mark=x,mark size=3pt,very thick,violet] coordinates {(95.0,1.490)};
+
+
+
+\addplot[only marks,mark=*,mark size=2.2pt,red!60!white] coordinates {(57.6,0.680)};
+\addplot[only marks,mark=*,mark size=2.2pt,red!60!white] coordinates {(90.8,1.107)};
+
+\addplot[only marks,mark=*,mark size=2.2pt,purple] coordinates {(97.6,1.222)};
+
+
+\addplot[only marks,mark=*,mark size=2.2pt,pink] coordinates {(88.4,1.509)};
+
+
+\addplot[only marks,mark=*,mark size=3.2pt,red] coordinates {(97.6,1.677)};
+
+\addplot[only marks,mark=x,mark size=3.2pt,red] coordinates {(98,1.776)};
+
+\addplot[only marks,mark=*,mark size=3.2pt,red] coordinates {(100,2.271)};
+
+\node[anchor=west,font=\small,red!60!white] at (axis cs:57.6,0.68) {OpenAI-o3};
+\node[anchor=west,font=\small,red!60!white] at (axis cs:90.8,1.107) {o3-self-refine};
+\node[anchor=west,font=\small,purple] at (axis cs:93.6,1.192) {o3-correction};
+\node[anchor=west,font=\small,pink]  at (axis cs:84.0,1.472) {o3-optimization};
+\node[anchor=west,font=\small, red] at (axis cs:97.6,1.677) {CudaForge};
+\node[anchor=west,font=\small, red] at (axis cs:98.0,1.776) {CudaForge};
+\node[anchor=west,font=\small, red] at (axis cs:90.0,2.200) {CudaForge-Scaling Up};
+\node[anchor=west,font=\small,orange] at (axis cs:82.0,1.10) {Kevin-32B};
+\node[anchor=west,font=\small,violet] at (axis cs:94.8,1.490) {Agentic Baseline};
+
+\end{axis}
+\end{tikzpicture}
+\caption{\agentname~achieves state-of-the-art results on KernelBench in both correctness and performance, 
+surpassing RL-based methods such as Kevin-32B~\citep{kevin-multi-turn-rl}, 
+the agentic baseline~\citep{lange2025robustagenticcudakernel}, 
+and OpenAI-o3~\citep{openai2025o3systemcard}. 
+To further evaluate the effectiveness of our design, 
+we additionally develop three customized variants of OpenAI-o3: {o3-self-refine}, {o3-correction}, and {o3-optimization}, which serve as baselines for ablation comparison. Scaling up maximum iteration rounds(\agentname-Scaling Up) further improves \agentname's performance to 2.27$\times$ speedup.
+Experimental details are provided in Section~\ref{exp}.}
+\label{fig:evolution_path}
+\end{figure}
+
+\vspace{-14pt}
+
+
+
+
+
+\input{sections/intro}
+\input{sections/CudaForge}
+\input{sections/experiments}
+
+
+\input{sections/conclusion}
+{{
+\bibliographystyle{unsrtnat}
+\bibliography{reasoning}
+}}
+
+\clearpage
+\newpage
+\input{sections/appendix}
+
+
+\end{document}

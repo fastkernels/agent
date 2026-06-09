@@ -1,0 +1,107 @@
+\documentclass{article}
+
+% if you need to pass options to natbib, use, e.g.:
+%     \PassOptionsToPackage{numbers, compress}{natbib}
+% before loading neurips_2026
+
+% The authors should use one of these tracks.
+% Before accepting by the NeurIPS conference, select one of the options below.
+% 0. "default" for submission
+\usepackage[preprint]{neurips_2026}
+% the "default" option is equal to the "main" option, which is used for the Main Track with double-blind reviewing.
+% 1. "main" option is used for the Main Track
+%  \usepackage[main]{neurips_2026}
+% 2. "position" option is used for the Position Paper Track
+%  \usepackage[position]{neurips_2026}
+% 3. "eandd" option is used for the Evaluations & Datasets Track
+% \usepackage[eandd]{neurips_2026}
+% if you want to opt-in for a de-anonymized submission (not recommended, but OK):
+%\usepackage[eandd, nonanonymous]{neurips_2026}
+% 4. "creativeai" option is used for the Creative AI Track
+%  \usepackage[creativeai]{neurips_2026}
+% 5. "sglblindworkshop" option is used for the Workshop with single-blind reviewing
+% \usepackage[sglblindworkshop]{neurips_2026}
+% 6. "dblblindworkshop" option is used for the Workshop with double-blind reviewing
+% \usepackage[dblblindworkshop]{neurips_2026}
+
+% After being accepted, the authors should add "final" behind the track to compile a camera-ready version.
+% 1. Main Track
+% \usepackage[main, final]{neurips_2026}
+% 2. Position Paper Track
+%  \usepackage[position, final]{neurips_2026}
+% 3. Evaluations & Datasets Track
+% \usepackage[eandd, final]{neurips_2026}
+% 4. Creative AI Track
+% \usepackage[creativeai, final]{neurips_2026}
+% 5. Workshop with single-blind reviewing
+% \usepackage[sglblindworkshop, final]{neurips_2026}
+% 6. Workshop with double-blind reviewing
+% \usepackage[dblblindworkshop, final]{neurips_2026}
+% Note. For the workshop paper template, both \title{} and \workshoptitle{} are required, with the former indicating the paper title shown in the title and the latter indicating the workshop title displayed in the footnote.
+% For workshops (5., 6.), the authors should add the name of the workshop, "\workshoptitle" command is used to set the workshop title.
+% \workshoptitle{WORKSHOP TITLE}
+
+% "preprint" option is used for arXiv or other preprint submissions
+% \usepackage[preprint]{neurips_2026}
+
+% to avoid loading the natbib package, add option nonatbib:
+%    \usepackage[nonatbib]{neurips_2026}
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{amsmath}        % math
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{xcolor}         % colors
+\usepackage{graphicx}       % images
+
+\input{header}
+
+\title{CUCo: An Agentic Framework for Compute and Communication Co-design}
+
+\author{%
+  Yoga Sri Varshan Varadharajan\thanks{Both authors contributed equally to this research.} \\
+  UT Austin \\
+  \texttt{yogasrivarshan@utexas.edu} \\
+  \And
+  Bodun Hu\footnotemark[1] \\
+  UT Austin \\
+  \texttt{bodunhu@utexas.edu} \\
+  \And
+  Saurabh Agarwal \\
+  UT Austin \\
+  \texttt{saurabh.agarwal@utexas.edu} \\
+  \And
+  Aditya Akella \\
+  UT Austin \\
+  \texttt{aditya@cs.utexas.edu} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Computation and communication in distributed LLM training and inference are traditionally optimized in isolation. Expert-crafted systems such as DeepEP, FLUX, and TokenWeave have demonstrated the potential of co-design, but each demands deep systems expertise and is tuned for specific hardware and workload configurations. We present \cufuse{}, an agentic framework that automates compute-communication co-design of CUDA kernels. \cufuse{} combines a structured design-space formalization with a correctness-first fast-path agent that produces reliable baselines and an evolution-driven slow-path agent that discovers high-performance co-design strategies. Across four multi-GPU workloads, \cufuse{} achieves up to 1.57$\times$ speedup over host-driven baselines. On a DeepSeek-V3 MoE layer, \cufuse{} discovers a two-stream overlap strategy that outperforms sequential DeepEP by hiding dispatch behind local compute---at an LLM inference cost under \$10/workload.\end{abstract}
+
+\input{intro2}
+\input{related}
+\input{cufuse}
+\input{eval}
+
+% \section{References}
+
+\bibliographystyle{plainnat}
+\bibliography{references.bib}
+
+\appendix
+\input{appendix/main}
+
+\newpage
+\input{checklist.tex}
+
+\end{document}

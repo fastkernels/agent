@@ -1,0 +1,51 @@
+\section{\env: A Gym for Kernel Generations}
+\label{sec:kernelgym}
+\subsection{Design Principles}
+\label{sec:kernelgym:design}
+Training LLM agents for iterative kernel generation requires an environment that can (1) evaluate correctness and performance at scale, (2) remain resilient against frequent CUDA runtime failures, and (3) provide granular feedback for RL optimization. To meet these requirements under constrained GPU resources, we architect \env{} as a scalable, distributed serving system that strictly decouples agent clients from kernel execution (Figure~\ref{fig:overview}, right). This separation keeps the client implementation lightweight---agents focus on policy learning, while the system handles scheduling, resource management, and failure recovery.
+
+Concretely, the design of \env{} follows four principles tailored to GPU workloads: (i) \textbf{Serialized execution}: profiling is highly sensitive to contention, so we enforce a \emph{one-GPU-one-task} policy to prevent context pollution and ensure reliable timing; (ii) \textbf{Elastic scalability}: GPU workers can be added or removed dynamically without interrupting training; (iii) \textbf{Fault isolation and self-recovery}: unsafe generated kernels frequently trigger illegal memory access or unrecoverable CUDA errors, hence failures must be isolated at the task level and recovered automatically to maintain long-horizon availability; (iv) \textbf{Rich environmental feedback}: coarse signals such as pass/fail or a single speedup value are insufficient for RL, so \env{} exposes structured feedback (e.g., profiling summaries and reward-hacking detection) to support optimization and data collection.
+
+
+% In this section, we introduce \env{}, a specialized environment designed for the iterative generation and optimization of GPU kernels. Training LLM agents for this task demands an environment that can (1) evaluate correctness and performance at scale, (2) remain resilient against frequent CUDA runtime failures, and (3) provide granular feedback for RL optimization.
+% To meet these requirements under constrained GPU resources, we architect \env{} as a scalable, distributed serving system that strictly decouples agent clients from kernel execution (Figure~\ref{fig:overview}, right). This separation simplifies the client-side implementation, allowing agents to focus on policy learning while the system handles scheduling, resource management, and failure recovery.
+
+% \subsection{Design Principles}
+% \label{sec:kernelgym:design}
+% The design of \env{} is guided by four core principles tailored to the unique challenges of GPU tasks:
+
+% \paragraph{Serialized Execution.}
+% GPU profiling is highly sensitive to resource contention. Unlike CPU tasks, kernel benchmarking requires a \emph{one-GPU-one-task} policy. \env{} enforces strict serialization of evaluations per GPU to prevent context pollution and ensuring reliable timing measurements.
+
+% \paragraph{Elastic Scalability.}
+% Unlike traditional CPU resources, GPU resources are more limited. The system should support dynamic scaling (adding/removing GPU workers) without interrupting training.
+
+% \paragraph{Fault Isolation and Self-Recovery.}
+% Generated kernels are inherently unsafe, frequently causing illegal memory accesses or unrecoverable CUDA errors. The environment must isolate failures at the task level and recover automatically, ensuring high availability during long-term RL training.
+
+% \paragraph{Rich Environmental Feedback.}
+% Training models to generate high-quality GPU kernels is challenging. Coarse feedbacks such as pass/fail correctness or a single speedup number are insufficient. To better support RL and data collection, \env{} offers richer feedback, including profiling summaries and reward-hacking detection.
+\subsection{Architecture and Modular Design}
+\paragraph{Server} \env{} adopts a server--worker architecture. The server serves as the central coordinator, consisting of an \textbf{Interface} (FastAPI) and a \textbf{Task Manager} (Redis + scheduler). The Interface exposes REST APIs for task submission/querying and worker registration. The Task Manager uses Redis to maintain persistent task/worker states and dispatches tasks to available workers with timeout-based re-queuing to sustain throughput.
+
+\paragraph{GPU Worker and Monitor} Kernel evaluations are executed by distributed GPU workers, where each GPU is treated as an independent worker instance. Each worker pulls scheduled tasks from the server and runs them sequentially using the configured backend/toolkits (\S\ref{sec:kernelgym:toolkits}). To contain CUDA/runtime failures from generated kernels without corrupting long-running processes, each evaluation runs in a fresh spawned subprocess, while the parent worker remains CUDA-clean and continues serving subsequent tasks. A worker monitor tracks liveness (e.g., heartbeat/process health), automatically restarts failed workers, and reassigns unfinished tasks to healthy workers to maintain RL training stability.
+
+\subsection{Backends and Toolkits}
+\label{sec:kernelgym:toolkits}
+
+\paragraph{Backends}
+Following~\citet{ouyang2025kernelbench}, \env{} runs the generated kernel code and evaluates it on two basic toolkits: \emph{correctness} and \emph{speedup} against a Torch reference.
+In this work we mainly use a Triton backend, but the same interface can also support other kernel languages (e.g., CUDA, TileLang).
+More broadly, \env{} can be extended to other GPU tasks by adding other toolkits that define how to run the code and how to leverage the output.
+
+For correctness, the backend compares the generated code with a reference implementation under a fixed test protocol (e.g., multiple randomized inputs) and returns a discrete status such as \texttt{pass}, \texttt{mismatch}, \texttt{runtime\_error}, or \texttt{compilation\_error}.
+For performance, the backend measures running time using a consistent timing procedure (e.g., warmup followed by repeated runs) and reports the speedup relative to the baseline. The performance metric would only be measured on the correct kernel code.
+
+\paragraph{Hacking Check}
+\wl{Modified} As discussed in \S\ref{sec:pitfalls}, reward hacking is a major failure mode in performance-oriented kernel RL. To mitigate such behaviors, \env{} implements an execution-based \emph{hacking check} that filters suspicious candidates from optimization.
+
+Concretely, \env{} instruments Triton's launch path to record executed Triton kernels and measures end-to-end runtime in both \texttt{train} and \texttt{eval} modes. Motivated by Figure~\ref{fig:pitfalls} (right), where the model branches on \texttt{self.training} to bypass execution of kernel code and inflate speedup, we mark a candidate as \texttt{incorrect} if it executes no Triton kernel in either mode.
+
+\paragraph{Profiler}
+\wl{Modified} Beyond scalar feedbacks, \env{} exposes profiling summaries to provide richer and more reliable feedback, which mainly serves as informative context for multi-turn optimization where the models recursively optimize the code during multi-turn RL training or test-time scaling. For incorrect candidates, the profiler returns structured failure diagnostics (e.g., exception type and traceback) to help the model localize and fix errors in subsequent turns. For correct executions, it provides kernel-level summaries of the executed code, alongside the default correctness and performance measurements, enabling the model to identify unoptimized operators.
+These signals are also used during training to reduce the \emph{lazy optimization} behavior in \S\ref{sec:pitfalls}. We operationalize this idea via Profiling-based Rewards and Profiling-based Rejection Sampling (\S\ref{sec:trade-off-rl}). The examples for profiling feedback are shown in Figure~\ref{fig:profiling-lazy-optim} (Appendix~\ref{ap:cases:profiling-lazy-optim}).

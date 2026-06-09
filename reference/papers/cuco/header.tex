@@ -1,0 +1,63 @@
+\newcommand{\bd}[1]{\textcolor{red}{BD: #1}}
+\newcommand{\saurabh}[1]{\textcolor{blue}{SA: #1}}
+% \newcommand{\saurabh}[1]{\grumbler{saurabh}{#1}{cyan}}
+\newcommand{\aditya}[1]{\textcolor{cyan}{AA: #1}}
+\newcommand{\yoga}[1]{\textcolor{orange}{YV: #1}}
+
+\newcommand{\cufuse}{\texttt{CUCo}}
+
+% Double-blind code mirror via Anonymous GitHub (\texttt{https://anonymous.4open.science/}): sign in,
+% register the \texttt{cuco\_evolve} repository, redact identifying terms, then paste the issued URL here.
+\newcommand{\AnonymousCucoMirrorURL}{https://anonymous.4open.science/r/CUCo-06EC/}
+
+\usepackage{xspace} \newcommand{\eg}{e.g.\xspace}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{textcomp} % for \textquotesingle in listings literate
+\usepackage{pifont} % for check and cross marks
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{capt-of}
+\usepackage{afterpage}
+\usepackage{hyphenat}
+% titlesec + \titlespacing conflict with acmart (ACM forbids redefining section commands)
+
+% Convenience macros (no custom symbols defined manually)
+\newcommand{\cmark}{\ding{51}} % ✓
+\newcommand{\xmark}{\ding{55}} % ✗
+\newcommand{\pmark}{\textbullet} % •
+
+
+% \newcommand{\eg}{{\it e.g.}, }
+\newcommand{\ie}{{\it i.e.}, }
+
+\definecolor{brewerpurple}{HTML}{AF4EA3}
+\definecolor{brewerblue}{HTML}{377EB8}
+\definecolor{NavyBlue}{HTML}{006EB8}
+\definecolor{BrickRed}{HTML}{B6321C}
+\definecolor{ForestGreen}{HTML}{009B55}
+\lstset{
+  basicstyle=\ttfamily\scriptsize,
+  literate={'}{\textquotesingle}1 {' '}{}{1},
+  breaklines=false,
+  numbers=left,
+  numberstyle=\tiny\color{blue},
+  xleftmargin=0em,
+  xrightmargin=0em,
+  stepnumber=1,
+  numbersep=1.5pt,
+  firstnumber=1,
+  escapeinside={(*@}{@*)}
+}
+
+\lstdefinestyle{customc2}{
+  emph={update\_metrics, prune\_completed\_jobs, exec\_jobs, accept, schedule, place, AcceptAll, Fifo, Consolidated, pop\_wait\_queue, update\_cluster},
+  escapeinside={(*@}{@*)},
+  emphstyle=\bfseries\color{NavyBlue},
+  commentstyle=\color{ForestGreen}\itshape\ttfamily,
+  morekeywords={yield},
+  stringstyle=\color{red}\ttfamily,
+  emph={[2]admission\_policy, scheduling\_policy, placement\_policy},emphstyle={[2]\bfseries\color{BrickRed}},
+  language=Python,
+  keywordstyle=\bfseries\color{green!40!black}
+}

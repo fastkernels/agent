@@ -1,0 +1,103 @@
+\begin{thebibliography}{18}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Ahmadian et~al.(2024)Ahmadian, Cremer, Gallé, Fadaee, Kreutzer, Pietquin, Üstün, and Hooker]{ahmadian2024basicsrevisitingreinforcestyle}
+Arash Ahmadian, Chris Cremer, Matthias Gallé, Marzieh Fadaee, Julia Kreutzer, Olivier Pietquin, Ahmet Üstün, and Sara Hooker.
+\newblock Back to basics: Revisiting reinforce style optimization for learning from human feedback in llms, 2024.
+\newblock URL \url{https://arxiv.org/abs/2402.14740}.
+
+\bibitem[Baronio et~al.(2025)Baronio, Marsella, Pan, Guo, and Alberti]{baronio2025kevinmultiturnrlgenerating}
+Carlo Baronio, Pietro Marsella, Ben Pan, Simon Guo, and Silas Alberti.
+\newblock Kevin: Multi-turn rl for generating cuda kernels, 2025.
+\newblock URL \url{https://arxiv.org/abs/2507.11948}.
+
+\bibitem[{CudaLLM Team}(2025)]{cudallm2025}
+{CudaLLM Team}.
+\newblock {CudaLLM}: Training language models to generate high-performance cuda kernels.
+\newblock \url{https://github.com/ByteDance-Seed/cudaLLM}, 2025.
+\newblock GitHub repository. Latest commit Aug 18, 2025 (commit 7d280a6). Accessed 2026-01-20.
+
+\bibitem[Dao(2024)]{dao2023flashattention2}
+Tri Dao.
+\newblock Flash{A}ttention-2: Faster attention with better parallelism and work partitioning.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2024.
+
+\bibitem[Jin et~al.(2025)Jin, Zeng, Yue, Yoon, Arik, Wang, Zamani, and Han]{jin2025searchr1trainingllmsreason}
+Bowen Jin, Hansi Zeng, Zhenrui Yue, Jinsung Yoon, Sercan Arik, Dong Wang, Hamed Zamani, and Jiawei Han.
+\newblock Search-r1: Training llms to reason and leverage search engines with reinforcement learning, 2025.
+\newblock URL \url{https://arxiv.org/abs/2503.09516}.
+
+\bibitem[Kool et~al.(2019)Kool, van Hoof, and Welling]{kool2019buy}
+Wouter Kool, Herke van Hoof, and Max Welling.
+\newblock Buy 4 {REINFORCE} samples, get a baseline for free!, 2019.
+\newblock URL \url{https://openreview.net/forum?id=r1lgTGL5DE}.
+
+\bibitem[Li et~al.(2025)Li, Wang, He, Li, Shi, Li, Hu, Che, Han, Liu, et~al.]{li2025autotriton}
+Shangzhan Li, Zefan Wang, Ye~He, Yuxuan Li, Qi~Shi, Jianling Li, Yonggang Hu, Wanxiang Che, Xu~Han, Zhiyuan Liu, et~al.
+\newblock Autotriton: Automatic triton programming with reinforcement learning in llms.
+\newblock \emph{arXiv preprint arXiv:2507.05687}, 2025.
+
+\bibitem[Liu et~al.(2025)Liu, Li, Fu, Wang, Liu, and Shen]{liu-li-2025-rl-collapse}
+Jiacai Liu, Yingru Li, Yuqian Fu, Jiawei Wang, Qian Liu, and Yu~Shen.
+\newblock When speed kills stability: Demystifying {RL} collapse from the training-inference mismatch, September 2025.
+\newblock URL \url{https://richardli.xyz/rl-collapse}.
+
+\bibitem[Novikov et~al.(2025)Novikov, Vũ, Eisenberger, Dupont, Huang, Wagner, Shirobokov, Kozlovskii, Ruiz, Mehrabian, Kumar, See, Chaudhuri, Holland, Davies, Nowozin, Kohli, and Balog]{novikov2025alphaevolvecodingagentscientific}
+Alexander Novikov, Ngân Vũ, Marvin Eisenberger, Emilien Dupont, Po-Sen Huang, Adam~Zsolt Wagner, Sergey Shirobokov, Borislav Kozlovskii, Francisco J.~R. Ruiz, Abbas Mehrabian, M.~Pawan Kumar, Abigail See, Swarat Chaudhuri, George Holland, Alex Davies, Sebastian Nowozin, Pushmeet Kohli, and Matej Balog.
+\newblock Alphaevolve: A coding agent for scientific and algorithmic discovery, 2025.
+\newblock URL \url{https://arxiv.org/abs/2506.13131}.
+
+\bibitem[Ouyang et~al.(2025)Ouyang, Guo, Arora, Zhang, Hu, Re, and Mirhoseini]{ouyang2025kernelbench}
+Anne Ouyang, Simon Guo, Simran Arora, Alex~L Zhang, William Hu, Christopher Re, and Azalia Mirhoseini.
+\newblock Kernelbench: Can {LLM}s write efficient {GPU} kernels?
+\newblock In \emph{Forty-second International Conference on Machine Learning}, 2025.
+\newblock URL \url{https://openreview.net/forum?id=yeoN1iQT1x}.
+
+\bibitem[Sutton \& Barto(2018)Sutton and Barto]{Sutton1998}
+Richard~S. Sutton and Andrew~G. Barto.
+\newblock \emph{Reinforcement Learning: An Introduction}.
+\newblock The MIT Press, second edition, 2018.
+\newblock URL \url{http://incompleteideas.net/book/the-book-2nd.html}.
+
+\bibitem[Sutton et~al.(1999)Sutton, McAllester, Singh, and Mansour]{NIPS1999_464d828b}
+Richard~S Sutton, David McAllester, Satinder Singh, and Yishay Mansour.
+\newblock Policy gradient methods for reinforcement learning with function approximation.
+\newblock In S.~Solla, T.~Leen, and K.~M\"{u}ller (eds.), \emph{Advances in Neural Information Processing Systems}, volume~12. MIT Press, 1999.
+\newblock URL \url{https://proceedings.neurips.cc/paper_files/paper/1999/file/464d828b85b0bed98e80ade0a5c43b0f-Paper.pdf}.
+
+\bibitem[Team(2025)]{qwen3technicalreport}
+Qwen Team.
+\newblock Qwen3 technical report, 2025.
+\newblock URL \url{https://arxiv.org/abs/2505.09388}.
+
+\bibitem[Wang et~al.(2025)Wang, Cheng, Shi, Tang, Mo, Xie, Ma, Xia, Xue, Yang, and Yang]{wang2025tilelangcomposabletiledprogramming}
+Lei Wang, Yu~Cheng, Yining Shi, Zhengju Tang, Zhiwen Mo, Wenhao Xie, Lingxiao Ma, Yuqing Xia, Jilong Xue, Fan Yang, and Zhi Yang.
+\newblock Tilelang: A composable tiled programming model for ai systems, 2025.
+\newblock URL \url{https://arxiv.org/abs/2504.17577}.
+
+\bibitem[Wei et~al.(2025)Wei, Sun, Papay, McKinney, Han, Fulford, Chung, Passos, Fedus, and Glaese]{wei2025browsecompsimplechallengingbenchmark}
+Jason Wei, Zhiqing Sun, Spencer Papay, Scott McKinney, Jeffrey Han, Isa Fulford, Hyung~Won Chung, Alex~Tachard Passos, William Fedus, and Amelia Glaese.
+\newblock Browsecomp: A simple yet challenging benchmark for browsing agents, 2025.
+\newblock URL \url{https://arxiv.org/abs/2504.12516}.
+
+\bibitem[Woo et~al.(2025)Woo, Zhu, Nie, Jia, Wang, and Park]{woo2025tritonrltrainingllmsthink}
+Jiin Woo, Shaowei Zhu, Allen Nie, Zhen Jia, Yida Wang, and Youngsuk Park.
+\newblock Tritonrl: Training llms to think and code triton without cheating, 2025.
+\newblock URL \url{https://arxiv.org/abs/2510.17891}.
+
+\bibitem[Yao et~al.(2025)Yao, Liu, Zhang, Dong, Shang, and Gao]{yao2025offpolicy}
+Feng Yao, Liyuan Liu, Dinghuai Zhang, Chengyu Dong, Jingbo Shang, and Jianfeng Gao.
+\newblock Your efficient rl framework secretly brings you off-policy rl training, August 2025.
+\newblock URL \url{https://fengyao.notion.site/off-policy-rl}.
+
+\bibitem[Ye et~al.(2025)Ye, Chen, Lai, Lin, Zhang, Wang, Chen, Kasikci, Grover, Krishnamurthy, and Ceze]{ye2025flashinfer}
+Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang, Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze.
+\newblock Flashinfer: Efficient and customizable attention engine for llm inference serving.
+\newblock \emph{arXiv preprint arXiv:2501.01005}, 2025.
+\newblock URL \url{https://arxiv.org/abs/2501.01005}.
+
+\end{thebibliography}
