@@ -40,3 +40,6 @@
 [submodule "reference/libraries/vllm-flash-attention"]
 	path = reference/libraries/vllm-flash-attention
 	url = https://github.com/vllm-project/flash-attention.git
+[submodule "reference/libraries/cutlass"]
+	path = reference/libraries/cutlass
+	url = https://github.com/NVIDIA/cutlass.git
