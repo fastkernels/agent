@@ -1,0 +1,121 @@
+# FA2 — distillation reference
+
+All paths are **relative to the repo root** `vllm_repo/vllm-flash-attention/`.
+
+## Target
+
+| | |
+|---|---|
+| Compiled extension | `_vllm_fa2_C` (built by `CMakeLists.txt:135-165`) |
+| Kernel arch | `8.0+PTX` (SM80 binary; runs on Ampere, Ada, Hopper, **and** Blackwell via PTX JIT) |
+| Use in vLLM | Default dense backend on Ampere/Ada and consumer Blackwell (SM120); fallback elsewhere |
+| Ops exposed | `varlen_fwd` (required) · `fwd_sparse`, `varlen_fwd_sparse` (optional, **unused by vLLM**) |
+| Scope | **Forward only**, inference only (no backward, no dropout in practice) |
+
+The vLLM Python wrapper that calls these ops:
+`vllm_repo/vllm/vllm/vllm_flash_attn/flash_attn_interface.py` → `flash_attn_varlen_func` (fa_version==2 branch, line 285) calls `torch.ops._vllm_fa2_C.varlen_fwd`.
+
+---
+
+## Functions to port — call tree (file:line)
+
+### 1. Op registration (the schema you must re-expose)
+- `csrc/flash_attn/flash_api_torch_lib.cpp:108` — `TORCH_LIBRARY_EXPAND` (binds `varlen_fwd`, `fwd_kvcache`, `fwd_sparse`, `varlen_fwd_sparse`)
+
+### 2. Host entry + parameter setup — `csrc/flash_attn/flash_api.cpp`
+- **`mha_varlen_fwd` — :515**  ← top-level op implementation (the one vLLM calls)
+- `set_params_fprop` — :25  (fills `Flash_fwd_params`)
+- `set_params_splitkv` — :298  (split-KV workspace; vLLM forces `num_splits ≤ 1`)
+- `set_params_alibi` — :330
+- `run_mha_fwd` — :242  (dispatcher → per-headdim launchers)
+- *(not called by vLLM, skip: `mha_fwd` dense :349, `mha_fwd_kvcache` :1238)*
+
+### 3. Launch templates — `csrc/flash_attn/src/flash_fwd_launch_template.h`
+- `run_flash_fwd` — :55  (grid/smem config, kernel selection)
+- `run_mha_fwd_splitkv_dispatch` — :164
+- `run_mha_fwd_hdim32` — :173 · `…hdim64` — :181 · `…hdim96` — :201 · `…hdim128` — :225 · `…hdim192` — :260 · `…hdim256` — :277
+- kernel def macros: `flash_fwd_kernel` :32 · `flash_fwd_splitkv_kernel` :41 · `flash_fwd_splitkv_combine_kernel` :49
+
+### 4. Device kernels (the actual math) — `csrc/flash_attn/src/flash_fwd_kernel.h`
+- `compute_attn` — :1091  (`__global__` body, non-split path → calls 1rowblock)
+- **`compute_attn_1rowblock` — :52**  ← CORE FA2 forward: load Q tile, loop K/V blocks, online softmax, accumulate O
+- `compute_attn_splitkv` — :1112  → **`compute_attn_1rowblock_splitkv` — :499**  ← split-KV **and paged-KV** path (needed: vLLM passes `block_table`)
+
+### 5. Shared device helpers (definitions to inline / re-implement)
+- `csrc/flash_attn/src/softmax.h` — `struct Softmax` :129 · `softmax_rescale_o` :137 (online softmax)
+- `csrc/flash_attn/src/mask.h` — `struct Mask` :112 · `apply_mask` :130 · `apply_mask_local` :39 · `apply_mask_causal` :76 (causal / sliding-window)
+- `csrc/flash_attn/src/block_info.h` — `struct BlockInfo` :13 (varlen offset math)
+- `csrc/flash_attn/src/kernel_traits.h` — tile sizes + **MMA atoms** (CUTLASS/CuTe — replace with raw `mma.sync`/WMMA)
+- `csrc/flash_attn/src/utils.h` — gemm / copy / warp-reduction wrappers (CUTLASS/CuTe)
+- `csrc/flash_attn/src/flash.h` — `Flash_fwd_params` struct (your op's data contract)
+- `csrc/flash_attn/src/static_switch.h`, `namespace_config.h`, `hardware_info.h` — compile-time switches / boilerplate
+
+### 6. (Optional) sparse ops — only if you want full API parity (vLLM never calls these)
+- `csrc/flash_attn/flash_api_sparse.cpp` — `mha_fwd_sparse`, `mha_varlen_fwd_sparse`
+- `csrc/flash_attn/src/flash_fwd_sparse_launch_template.h` — `run_flash_sparse_fwd` :27, `run_mha_fwd_sparse_hdim*` :71+
+- `csrc/flash_attn/src/flash_fwd_sparse_kernel.h` — sparse kernel body
+- `csrc/flash_attn/src/flash_sparse.h` — `Flash_fwd_params_sparse`
+
+---
+
+## Full list of files used by FA2
+
+### A. Core hand-written sources (contain the real definitions — these are what you port)
+```
+csrc/common/pytorch_shim.h
+csrc/common/registration.h
+csrc/flash_attn/flash_api.cpp
+csrc/flash_attn/flash_api_torch_lib.cpp
+csrc/flash_attn/src/flash.h
+csrc/flash_attn/src/flash_fwd_kernel.h
+csrc/flash_attn/src/flash_fwd_launch_template.h
+csrc/flash_attn/src/kernel_traits.h
+csrc/flash_attn/src/softmax.h
+csrc/flash_attn/src/mask.h
+csrc/flash_attn/src/block_info.h
+csrc/flash_attn/src/utils.h
+csrc/flash_attn/src/static_switch.h
+csrc/flash_attn/src/namespace_config.h
+csrc/flash_attn/src/hardware_info.h
+```
+
+### B. Compiled-out for inference (present in include graph, not needed for the forward op)
+```
+csrc/flash_attn/src/dropout.h          # dropout (FLASHATTENTION_DISABLE_DROPOUT path; vLLM uses p=0)
+csrc/flash_attn/src/philox.cuh         # RNG for dropout
+csrc/flash_attn/src/philox_unpack.cuh  # RNG for dropout
+csrc/flash_attn/src/rotary.h           # fused rotary — varlen_fwd has no rotary args
+```
+
+### C. Sparse-only (optional, unused by vLLM)
+```
+csrc/flash_attn/flash_api_sparse.cpp
+csrc/flash_attn/src/flash_sparse.h
+csrc/flash_attn/src/flash_fwd_sparse_kernel.h
+csrc/flash_attn/src/flash_fwd_sparse_launch_template.h
+```
+
+### D. Generated instantiation `.cu` stubs (auto-generated by `csrc/flash_attn/src/generate_kernels.py`; each just instantiates a template — you do NOT hand-port these, you reproduce the matrix)
+
+Forward dense (24) — `hdim ∈ {32,64,96,128,192,256}` × `{fp16,bf16}` × `{causal, non-causal}`:
+```
+csrc/flash_attn/src/flash_fwd_hdim{32,64,96,128,192,256}_{fp16,bf16}[_causal]_sm80.cu
+```
+Forward split-KV (24) — same matrix, `flash_fwd_split_*`:
+```
+csrc/flash_attn/src/flash_fwd_split_hdim{32,64,96,128,192,256}_{fp16,bf16}[_causal]_sm80.cu
+```
+Sparse (4, optional):
+```
+csrc/flash_attn/src/flash_fwd_sparse_hdim128_{fp16,bf16}[_causal]_sm80.cu
+```
+> CMake glob: `csrc/flash_attn/src/flash_fwd_*.cu` (52 files total). The build instantiates `run_mha_fwd_<dtype, headdim, is_causal>`.
+
+### E. External dependencies (the boundary to REMOVE for a no-CUTLASS build)
+`cute/*`, `cutlass/*` (via `csrc/cutlass/include`, fetched at build — empty in checkout), plus stock `cuda_fp16.h`, `cuda_bf16.h`, `cuda_runtime.h`, ATen/c10/torch.
+→ Distillation = re-implement the QKᵀ and PV GEMMs (raw `mma.sync m16n8k16` / WMMA) and the CuTe tensor/copy layer that `kernel_traits.h` + `utils.h` pull in.
+
+---
+
+## Feature set the forward op must honor (from the args vLLM passes)
+dtypes fp16/bf16 · varlen (`cu_seqlens_q/k`, `seqused_k`) · GQA/MQA · paged KV (`block_table`) · causal · sliding window (`window_size_left/right`) · softcap · ALiBi · returns `softmax_lse`. **No** dropout, **no** split>1, **no** FP8 (those are FA3).
