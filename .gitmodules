@@ -37,3 +37,6 @@
 [submodule "reference/related-works/mlsys-contest-syfi-fully-agent"]
 	path = reference/related-works/mlsys-contest-syfi-fully-agent
 	url = https://github.com/kamahori/mlsys-contest-syfi-fully-agent.git
+[submodule "reference/libraries/vllm-flash-attention"]
+	path = reference/libraries/vllm-flash-attention
+	url = https://github.com/vllm-project/flash-attention.git
