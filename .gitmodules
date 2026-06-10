@@ -7,3 +7,21 @@
 [submodule "reference/KernelGYM"]
 	path = reference/papers/KernelGYM
 	url = git@github.com:hkust-nlp/KernelGYM.git
+[submodule "reference/libraries/DeepGEMM"]
+	path = reference/libraries/DeepGEMM
+	url = https://github.com/deepseek-ai/DeepGEMM.git
+[submodule "reference/libraries/FlashMLA"]
+	path = reference/libraries/FlashMLA
+	url = https://github.com/deepseek-ai/FlashMLA.git
+[submodule "reference/libraries/ThunderKittens"]
+	path = reference/libraries/ThunderKittens
+	url = https://github.com/HazyResearch/ThunderKittens.git
+[submodule "reference/libraries/flashinfer"]
+	path = reference/libraries/flashinfer
+	url = https://github.com/flashinfer-ai/flashinfer.git
+[submodule "reference/libraries/cccl"]
+	path = reference/libraries/cccl
+	url = https://github.com/NVIDIA/cccl.git
+[submodule "reference/libraries/TransformerEngine"]
+	path = reference/libraries/TransformerEngine
+	url = https://github.com/NVIDIA/TransformerEngine.git
