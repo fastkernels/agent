@@ -59,6 +59,19 @@ GPU_IDS = list(range(NUM_GPUS))
 DISTILL_NAMESPACE = "_distill_fa3_C"   # used during development / in-process A/B
 DELIVERABLE_NAMESPACE = "_vllm_fa3_C"  # used for the final swap into vLLM
 
+# --------------------------------------------------------------------------------------
+# Claude Code headless brain (codegen / optimize).
+# --------------------------------------------------------------------------------------
+# Use the FULL model id, not the alias.  (settings.json also sets ANTHROPIC_MODEL=claude-opus-4-8.)
+HEADLESS_MODEL = "claude-opus-4-8"
+# Effort level passed to `claude --effort <level>` (low|medium|high|xhigh|ultracode).
+# Default xhigh: deepest single-agent reasoning for hard kernel codegen, while the Python
+# orchestrator (NOT the brain) owns the loop/eval/multi-GPU/checkpoint and the "one candidate
+# per step" contract.  Use ultracode only when you want the brain to do in-step multi-variant
+# search (costlier, the brain spawns its own workflows); use high to economize on long runs.
+HEADLESS_EFFORT = "xhigh"
+
+
 # Toolkit-only nvcc flags (NO cutlass/cute include path -> anti-cheat by construction).
 NVCC_BASE_FLAGS = [
     "-O3", "-std=c++17", "--use_fast_math",

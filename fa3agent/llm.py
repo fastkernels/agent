@@ -30,7 +30,7 @@ def claude_available() -> bool:
     return shutil.which("claude") is not None
 
 
-def run_claude(prompt: str, cwd: str, model: str = "opus",
+def run_claude(prompt: str, cwd: str, model: Optional[str] = None, effort: Optional[str] = None,
                session_id: Optional[str] = None, timeout: int = 5400,
                allowed_dirs: Optional[list[str]] = None) -> LLMResult:
     """Spawn `claude -p` headless, parse the JSON envelope, return text + session id.
@@ -45,12 +45,16 @@ def run_claude(prompt: str, cwd: str, model: str = "opus",
     if not claude_available():
         return LLMResult(ok=False, error="claude CLI not found on PATH")
 
+    model = model or C.HEADLESS_MODEL
+    effort = effort if effort is not None else C.HEADLESS_EFFORT
     cmd = [
         "claude", "-p", prompt,
         "--output-format", "json",
         "--dangerously-skip-permissions",
         "--model", model,
     ]
+    if effort:
+        cmd += ["--effort", effort]
     if session_id:
         cmd += ["--resume", session_id]
 

@@ -30,8 +30,9 @@ def cmd_run(a):
     if not run_id:
         run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}"
     print(f"run_id={run_id}  configs={a.configs}  max_steps={a.max_steps}  model={a.model}  "
-          f"resume={a.resume}")
+          f"effort={a.effort}  resume={a.resume}")
     orch = Orchestrator(run_id, config_set=a.configs, max_steps=a.max_steps, model=a.model,
+                        effort=a.effort,
                         decode_tokens=a.decode_tokens, do_decode_equiv=not a.no_decode_equiv,
                         profile_enabled=not a.no_profile)
     result = orch.run()
@@ -67,7 +68,10 @@ def main(argv=None):
     r = sub.add_parser("run", help="drive the optimization loop")
     r.add_argument("--max-steps", type=int, default=None, help="optional step budget (loops indefinitely if unset)")
     r.add_argument("--configs", choices=["dev", "full"], default="dev")
-    r.add_argument("--model", default="opus")
+    r.add_argument("--model", default=C.HEADLESS_MODEL, help="full model id for the headless brain")
+    r.add_argument("--effort", default=C.HEADLESS_EFFORT,
+                   choices=["low", "medium", "high", "xhigh", "ultracode"],
+                   help="reasoning effort for the headless brain (default xhigh)")
     r.add_argument("--run-id", default=None)
     r.add_argument("--resume", action="store_true")
     r.add_argument("--decode-tokens", type=int, default=100)

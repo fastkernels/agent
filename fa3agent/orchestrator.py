@@ -36,14 +36,16 @@ def _geomean(xs: list[float]) -> float:
 
 class Orchestrator:
     def __init__(self, run_id: str, config_set: str = "dev", max_steps: Optional[int] = None,
-                 model: str = "opus", seed: int = 0, decode_tokens: int = 100,
+                 model: Optional[str] = None, effort: Optional[str] = None, seed: int = 0,
+                 decode_tokens: int = 100,
                  decode_model: Optional[str] = None, do_decode_equiv: bool = True,
                  profile_enabled: bool = True):
         self.run_id = run_id
         self.cfgs = C.get_configs(config_set)
         self.config_set = config_set
         self.max_steps = max_steps
-        self.model = model
+        self.model = model or C.HEADLESS_MODEL
+        self.effort = effort if effort is not None else C.HEADLESS_EFFORT
         self.seed = seed
         self.decode_tokens = decode_tokens
         self.decode_model = decode_model
@@ -51,7 +53,7 @@ class Orchestrator:
         self.profile_enabled = profile_enabled
         self.pool = GPUPool()
         self.paths = checkpoint.init_run(run_id, dict(
-            config_set=config_set, max_steps=max_steps, model=model,
+            config_set=config_set, max_steps=max_steps, model=self.model, effort=self.effort,
             configs=[c.name for c in self.cfgs], created=common.now()))
         self.comp = self._load_components()
         self.kstore = None
@@ -137,7 +139,8 @@ class Orchestrator:
                 focus=focus,
                 supervisor_note=self._supervisor_note)
 
-        res = llm.run_claude(prompt, cwd=C.REPO_ROOT, model=self.model, session_id=session_id)
+        res = llm.run_claude(prompt, cwd=C.REPO_ROOT, model=self.model, effort=self.effort,
+                             session_id=session_id)
         # If the brain didn't produce a file, bootstrap from the seed (guarantees a candidate).
         if not os.path.exists(cand_path):
             if best is None and os.path.exists(os.path.join(C.PKG_DIR, "seed_kernel.cu")):
