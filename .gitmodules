@@ -1,11 +1,11 @@
 [submodule "reference/cuco-code"]
-	path = reference/papers/cuco-code
+	path = reference/related-works/cuco-code
 	url = git@github.com:UT-InfraAI/cuco.git
 [submodule "reference/cudaforge-code"]
-	path = reference/papers/cudaforge-code
+	path = reference/related-works/cudaforge-code
 	url = git@github.com:OptimAI-Lab/CudaForge.git
 [submodule "reference/KernelGYM"]
-	path = reference/papers/KernelGYM
+	path = reference/related-works/KernelGYM
 	url = git@github.com:hkust-nlp/KernelGYM.git
 [submodule "reference/libraries/DeepGEMM"]
 	path = reference/libraries/DeepGEMM
@@ -25,3 +25,15 @@
 [submodule "reference/libraries/TransformerEngine"]
 	path = reference/libraries/TransformerEngine
 	url = https://github.com/NVIDIA/TransformerEngine.git
+[submodule "reference/related-works/kernel-design-agents"]
+	path = reference/related-works/kernel-design-agents
+	url = https://github.com/mit-han-lab/kernel-design-agents.git
+[submodule "reference/related-works/mlsys2026-flashinfer-contest-solution"]
+	path = reference/related-works/mlsys2026-flashinfer-contest-solution
+	url = https://github.com/mit-han-lab/mlsys2026-flashinfer-contest-solution.git
+[submodule "reference/related-works/mlsys2026-flashinfer-contest"]
+	path = reference/related-works/mlsys2026-flashinfer-contest
+	url = https://github.com/mit-han-lab/mlsys2026-flashinfer-contest.git
+[submodule "reference/related-works/mlsys-contest-syfi-fully-agent"]
+	path = reference/related-works/mlsys-contest-syfi-fully-agent
+	url = https://github.com/kamahori/mlsys-contest-syfi-fully-agent.git
