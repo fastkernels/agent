@@ -62,12 +62,21 @@ def _fmt(v, nd=1) -> str:
 
 
 # --- 1. kernel name discovery --------------------------------------------------
-def discover_kernel_regex(so_path: str, dtype: Optional[str] = None) -> Optional[str]:
-    """Return a mangled-name regex selecting the candidate's attention kernel(s).
+# torch/aten/library helper kernels that may be linked into the candidate .so but are NOT the
+# attention kernel (and do NOT launch during the profiling driver) -- must be excluded, else the
+# -k regex matches a kernel that never runs and ncu writes no report (observed on wgmma rewrites).
+_ATEN_PAT = re.compile(
+    r"at6native|_GLOBAL__N__|elementwise|Philox|arange|RangeFactories|thrust|cub|"
+    r"vectorized|CatArray|reduce_kernel|fill_|index_elementwise|c10",
+    re.I)
 
-    Uses `cuobjdump --dump-sass` and keeps function names that look like attention
-    kernels (flash / attn / fwd / mha).  Falls back to a concrete escaped name.
-    Returns None if nothing plausible is found (caller then profiles unfiltered).
+
+def discover_kernel_regex(so_path: str, dtype: Optional[str] = None) -> Optional[str]:
+    """Return a mangled-name regex selecting the candidate's OWN attention kernel.
+
+    Uses `cuobjdump --dump-sass`, EXCLUDES torch/aten helper kernels, then prefers an
+    attention-looking name (flash/attn/fwd/mha).  Falls back to the first non-aten kernel's
+    escaped name.  Returns None only if nothing plausible is found (caller profiles unfiltered).
     """
     try:
         out = subprocess.run(["cuobjdump", "--dump-sass", so_path],
@@ -77,12 +86,17 @@ def discover_kernel_regex(so_path: str, dtype: Optional[str] = None) -> Optional
     names = re.findall(r"Function\s*:\s*(\S+)", out)
     if not names:
         return None
+    own = [n for n in names if not _ATEN_PAT.search(n)] or names   # drop torch/aten helpers
     pat = re.compile(r"flash|attn|fwd|mha|fmha|attention", re.I)
-    cands = [n for n in names if pat.search(n)] or names
-    # Prefer a stable common token rather than a full mangled name (templated kernels).
-    for tok in ("attn_kernel", "flash_fwd", "flash", "fmha", "attn", "mha", "fwd"):
-        if any(tok in n for n in cands):
-            return f"regex:{tok}"
+    cands = [n for n in own if pat.search(n)] or own
+    # Return a BROAD alternation matching ANY of the candidate's attention-kernel variants -- a
+    # candidate may ship several (e.g. scalar attn_kernel AND wgmma attn_mma_kernel); a single
+    # narrow token ('attn_kernel') would miss 'attn_mma_kernel' and ncu would match a kernel that
+    # never launches for the profiled config -> no report. With -c 1 -s 1 ncu profiles the first
+    # matching launch (the combine kernel is excluded, so the main attention kernel is profiled).
+    present = [t for t in ("attn", "flash", "fmha", "mha", "attention", "fwd") if any(t in n for n in cands)]
+    if present:
+        return "regex:" + "|".join(present)
     return "regex:" + re.escape(cands[0])
 
 
