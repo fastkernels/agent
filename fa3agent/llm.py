@@ -60,7 +60,10 @@ def run_claude(prompt: str, cwd: str, model: Optional[str] = None, effort: Optio
         base += ["--resume", session_id]
 
     if stream_log:
-        return _run_streamed(base + ["--output-format", "stream-json", "--verbose"],
+        # --include-partial-messages streams thinking/text DELTAS live (so brain.log advances
+        # continuously during long turns, not only when an event completes).
+        return _run_streamed(base + ["--output-format", "stream-json", "--verbose",
+                                     "--include-partial-messages"],
                              cwd, timeout, stream_log, session_id)
 
     cmd = base + ["--output-format", "json"]
