@@ -176,6 +176,11 @@ def measure_all(namespace, cfgs, pool) -> list[common.ConfigResult]:
     """Measure perf across `cfgs` using one exclusive GPU lease per config so
     that ONLY ONE kernel runs per GPU at a time (perf/profiling discipline).
 
+    NOTE: this runs the measurements in THREADS (one per GPU) in the caller's process. Because
+    the GIL serializes host-side launch dispatch, that asymmetrically inflates the small-kernel
+    CUDA-event timing and the baseline/candidate ratio (~2-3x). Prefer measure_all_subprocess for
+    the loop's perf gate; this threaded variant is kept only for simple single-call smoke tests.
+
     Returns a list of ConfigResult aligned with `cfgs`.
     """
     cfgs = list(cfgs)
@@ -184,3 +189,71 @@ def measure_all(namespace, cfgs, pool) -> list[common.ConfigResult]:
         return measure(namespace, cfg, gpu_id)
 
     return pool.map_exclusive(_run, cfgs)
+
+
+def measure_all_subprocess(namespace, cfgs, so_path, gpu_ids=None, baseline_ns="_vllm_fa3_C",
+                           on_result=None, timeout=2400) -> list[common.ConfigResult]:
+    """Measure perf across `cfgs`, each config in its OWN process pinned to one GPU via
+    CUDA_VISIBLE_DEVICES, with up to len(gpu_ids) processes running concurrently.
+
+    This is the CORRECT way to use multiple GPUs for perf: separate processes do NOT share the
+    GIL, so host-launch dispatch isn't serialized and the CUDA-event timing is clean (verified:
+    separate-process concurrent ratios == isolated ratios; in-process threaded concurrent is a
+    ~2-3x artifact). Configs are sharded round-robin across GPUs; each GPU runs ONE process that
+    measures its shard sequentially (one kernel per GPU at a time). `on_result(r, gpu)` is called
+    live as each config completes (for progress logging). Returns ConfigResults aligned to `cfgs`.
+    """
+    import os
+    import sys
+    import json
+    import subprocess
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    if gpu_ids is None:
+        gpu_ids = C.GPU_IDS
+    cfgs = list(cfgs)
+    shards = {g: [] for g in gpu_ids}
+    for i, cfg in enumerate(cfgs):
+        shards[gpu_ids[i % len(gpu_ids)]].append(cfg)
+
+    results: dict = {}
+    lock = threading.Lock()
+
+    def run_shard(gpu):
+        shard = shards[gpu]
+        if not shard:
+            return
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu),
+                   PYTHONPATH=C.REPO_ROOT + os.pathsep + os.environ.get("PYTHONPATH", ""))
+        cmd = [sys.executable, "-m", "fa3agent.perf._measure_main", so_path, namespace] + \
+              [c.name for c in shard]
+        try:
+            p = subprocess.Popen(cmd, cwd=C.REPO_ROOT, env=env, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            for line in p.stdout:
+                line = line.strip()
+                if line.startswith("MEASURE_JSON:"):
+                    d = json.loads(line[len("MEASURE_JSON:"):])
+                    r = common.ConfigResult(**{k: v for k, v in d.items()
+                                               if k in common.ConfigResult.__dataclass_fields__})
+                    with lock:
+                        results[r.config] = r
+                    if on_result:
+                        try:
+                            on_result(r, gpu)
+                        except Exception:
+                            pass
+            p.wait(timeout=timeout)
+        except Exception as e:  # noqa
+            for c in shard:
+                with lock:
+                    results.setdefault(c.name, common.ConfigResult(
+                        config=c.name, correct=True, ratio=0.0, note=f"perf shard err: {e!r}"[:200]))
+
+    with ThreadPoolExecutor(max_workers=len(gpu_ids)) as ex:
+        list(ex.map(run_shard, gpu_ids))
+
+    return [results.get(c.name, common.ConfigResult(config=c.name, correct=True, ratio=0.0,
+                                                    note="no perf result")) for c in cfgs]
+

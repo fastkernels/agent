@@ -185,18 +185,18 @@ class Orchestrator:
             return ev, profile  # never profile/perf an incorrect kernel
         self._log(f"[correctness] {ev.num_correct}/{len(self.cfgs)} passed")
 
-        # PERF (one kernel per GPU at a time)
+        # PERF: measure each config in its OWN process pinned to one GPU (1 kernel/GPU), up to
+        # len(gpu_ids) concurrent. Process isolation (not threads) avoids the GIL/host-launch
+        # contention that inflated the baseline/candidate ratio ~2-3x in the old threaded sweep.
         if self.comp.get("measure"):
-            self._log(f"[perf] measuring {len(self.cfgs)} configs (1 kernel/GPU across {len(self.pool.gpu_ids)})...")
-            def _meas(cfg, gpu):
-                try:
-                    r = self.comp["measure"](ns, cfg, gpu)
-                    self._log(f"[perf]   {cfg.name}: ratio={r.ratio:.3f} "
-                              f"(cand {r.cand_latency_ms:.3f}ms / base {r.base_latency_ms:.3f}ms) gpu{gpu}")
-                    return r
-                except Exception as e:
-                    return ConfigResult(config=cfg.name, correct=True, ratio=0.0, note=f"measure err: {e!r}")
-            perf = self.pool.map_exclusive(_meas, self.cfgs)
+            self._log(f"[perf] measuring {len(self.cfgs)} configs (1 process/GPU, isolated timing, "
+                      f"{len(self.pool.gpu_ids)} GPUs)...")
+            from fa3agent.perf.measure import measure_all_subprocess
+
+            def _on(r, gpu):
+                self._log(f"[perf]   {r.config}: ratio={r.ratio:.3f} "
+                          f"(cand {r.cand_latency_ms:.3f}ms / base {r.base_latency_ms:.3f}ms) gpu{gpu}")
+            perf = measure_all_subprocess(ns, self.cfgs, so_path, self.pool.gpu_ids, on_result=_on)
             by = {r.config: r for r in perf if r}
             for r in ev.per_config:
                 if r.config in by:
@@ -371,13 +371,25 @@ class Orchestrator:
                     self._supervisor_note = ("You have not improved in several rounds. Step back, "
                         "review the profiler bottleneck, and try a DIFFERENT subsystem/approach this round.")
 
-            # success?
+            # success? Require a fresh ISOLATED re-measure to reproduce the bar before declaring
+            # success (guards against any measurement noise driving a false termination).
             if rec.status == "correct" and rec.eval:
                 mr = rec.eval.get("min_ratio", 0.0)
                 de = rec.eval.get("decode_equiv_ok", None)
                 if mr >= (1.0 - C.PERF_NOISE_BAND) and (de is True or not self.do_decode_equiv):
-                    self._log(f"SUCCESS: correct + min_ratio {mr:.3f} >= 1.0 on all configs + decode_equiv={de}")
-                    return {"status": "success", "step": step, "min_ratio": mr}
+                    so = (rec.build or {}).get("so_path")
+                    mr2 = mr
+                    if so and self.comp.get("measure"):
+                        from fa3agent.perf.measure import measure_all_subprocess
+                        rem = measure_all_subprocess(self._ns(rec.step), self.cfgs, so, self.pool.gpu_ids)
+                        rr = [r.ratio for r in rem if r.ratio > 0]
+                        mr2 = min(rr) if rr else 0.0
+                        self._log(f"[verify] success re-measure: min_ratio {mr:.3f} -> {mr2:.3f} (isolated)")
+                        rec.eval["min_ratio_recheck"] = mr2
+                    if mr2 >= (1.0 - C.PERF_NOISE_BAND):
+                        self._log(f"SUCCESS: correct + min_ratio {mr2:.3f} >= 1.0 on all configs + decode_equiv={de}")
+                        return {"status": "success", "step": step, "min_ratio": mr2}
+                    self._log(f"[verify] re-measure {mr2:.3f} below bar -> NOT terminating; continuing.")
             if rec.status == "env_fatal":
                 self._log("ABORT: environment-fatal error (unfixable by agent).")
                 return {"status": "env_fatal", "step": step}
