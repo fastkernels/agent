@@ -70,6 +70,14 @@ HEADLESS_MODEL = "claude-opus-4-8"
 # per step" contract.  Use ultracode only when you want the brain to do in-step multi-variant
 # search (costlier, the brain spawns its own workflows); use high to economize on long runs.
 HEADLESS_EFFORT = "xhigh"
+# Carry the Claude session across refine steps via `claude --resume`?  DEFAULT FALSE.
+# `--resume` replays the ENTIRE prior conversation as the new request; on the Snowflake-Cortex
+# relay that oversized payload fails with retryable "unknown" errors (observed: step 0 fresh
+# session OK, step 1 --resume stuck in an api_retry loop).  Each step instead runs a FRESH
+# session -- the refine prompt carries the distilled context (last eval, profiler bottleneck,
+# knowledge hints) and the champion .cu is on disk, so continuity is preserved without the
+# unbounded-growth resume payload.
+HEADLESS_RESUME_SESSION = False
 
 
 # Toolkit-only nvcc flags (NO cutlass/cute include path -> anti-cheat by construction).

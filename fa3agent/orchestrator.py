@@ -120,7 +120,11 @@ class Orchestrator:
     def _generate(self, step: int, prev: Optional[dict], best: Optional[dict]) -> tuple[str, Optional[str]]:
         cid = f"step{step:03d}"
         cand_path = os.path.join(self.paths["candidates"], f"{cid}.cu")
-        session_id = prev.get("session_id") if prev else None
+        # Session resume is OFF by default: replaying the full prior conversation as the request
+        # fails on the Cortex relay (api_retry loop). Fresh session per step; context is in the
+        # refine prompt + the champion .cu on disk. See config.HEADLESS_RESUME_SESSION.
+        prev_sid = prev.get("session_id") if prev else None
+        session_id = prev_sid if C.HEADLESS_RESUME_SESSION else None
 
         if best is None:
             prompt = prompts.bootstrap_prompt(cand_path, [c.name for c in self.cfgs])
