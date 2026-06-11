@@ -77,6 +77,7 @@ class Orchestrator:
         grab("anticheat", "fa3agent.sandbox.anticheat", "check")
         grab("check_correctness", "fa3agent.verify.correctness", "check_correctness")
         grab("check_decode_equiv", "fa3agent.verify.decode_equiv", "check_decode_equiv")
+        grab("check_insitu", "fa3agent.verify.insitu", "check_insitu")
         grab("run_sanitizer", "fa3agent.verify.sanitizer", "run_sanitizer")
         grab("measure", "fa3agent.perf.measure", "measure")
         # NCU profiling runs OUT-OF-PROCESS (see _profile_subprocess): ncu_report + torch
@@ -196,15 +197,9 @@ class Orchestrator:
             with self.pool.exclusive(gpu):
                 profile = self._profile_subprocess(so_path, ns, wcfg.name, gpu)
 
-        # DECODE EQUIVALENCE (semantic promotion gate)
-        if self.do_decode_equiv and self.comp.get("check_decode_equiv"):
-            try:
-                ok, note = self.comp["check_decode_equiv"](so_path, ns, model=self.decode_model,
-                                                           num_tokens=self.decode_tokens)
-                ev.decode_equiv_ok = ok
-                ev.decode_equiv_note = note
-            except Exception as e:
-                ev.decode_equiv_note = f"decode_equiv err: {e!r}"
+        # NOTE: the faithful vLLM gates (in-situ A/B, then full decode-equality) are run at the
+        # PROMOTION tier in run(), not here -- they need a model load and only matter for a
+        # candidate that is correct AND improves the best ratio (cost-tiered verification).
         return ev, profile
 
     # ---- one step -----------------------------------------------------------------------
@@ -302,6 +297,31 @@ class Orchestrator:
                 self._log(f"[error] step {step} crashed: {e!r}\n{traceback.format_exc()[:1000]}")
                 rec = StepRecord(step=step, cid=f"step{step:03d}", parent=None, status="error",
                                  knowledge_note=str(e)[:300])
+
+            # ---- faithful vLLM gates, COST-TIERED (only for a correct promotion candidate) ----
+            # Tier 2: in-situ A/B on LIVE vLLM tensors (cheap, faithful -- catches live-layout
+            #         bugs the synthetic gate misses, e.g. broadcast-descale OOB).
+            # Tier 3: full 100-token greedy decode-equality (only when the candidate also meets
+            #         the perf target -- the final acceptance gate for the residual near-tie risk).
+            if self.do_decode_equiv and rec.status == "correct" and rec.eval:
+                mr = rec.eval.get("min_ratio", 0.0)
+                promo_cand = (best is None) or (mr >= self._best_min_ratio - C.PERF_NOISE_BAND)
+                so = (rec.build or {}).get("so_path"); ns = self._ns(rec.step)
+                if promo_cand and so and self.comp.get("check_insitu"):
+                    gpu = self.pool.gpu_ids[0]
+                    with self.pool.exclusive(gpu):
+                        ir = self.comp["check_insitu"](so, ns)
+                    rec.eval["insitu"] = ir
+                    self._log(f"[insitu] {ir.get('note','')}")
+                    if ir.get("ok") is False and not ir.get("skip"):
+                        rec.status = "insitu_fail"   # correct on synthetic, diverges on live -> not promotable
+                    elif mr >= (1.0 - C.PERF_NOISE_BAND) and self.comp.get("check_decode_equiv"):
+                        gpu = self.pool.gpu_ids[0]
+                        with self.pool.exclusive(gpu):
+                            ok, note = self.comp["check_decode_equiv"](so, ns, model=self.decode_model,
+                                                                       num_tokens=self.decode_tokens)
+                        rec.eval["decode_equiv_ok"] = ok; rec.eval["decode_equiv_note"] = note
+                        self._log(f"[decode_equiv] ok={ok}: {note}")
 
             # promotion: first correct candidate, or one that improves the MINIMUM ratio
             improved = False

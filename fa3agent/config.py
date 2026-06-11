@@ -234,12 +234,24 @@ def get_configs(which: str) -> list[Config]:
 # semantic 100-token greedy-decode equality check (decode_equiv.py).
 # --------------------------------------------------------------------------------------
 ERR_MULT = 2.0
+# Calibration study (Experiment A) measured the baseline's OWN self-nondeterminism envelope
+# (split-K reduction order): bf16 out max-abs<=3.9e-3 / mean-abs<=3.7e-5, fp16<=1.2e-4,
+# lse(fp32)<=2e-6.  IMPORTANT: that is how much the baseline differs from ITSELF; a candidate
+# is a DIFFERENT algorithm and legitimately differs from the baseline by more even when correct
+# (e.g. the known-correct seed has bf16 bias ~1.4e-4 vs baseline self-bias 3.7e-5).  So these
+# SYNTHETIC tolerances are a loose NECESSARY pre-filter (reject NaN/shape/order-of-magnitude
+# drift) -- NOT a decode-equivalence proof.  Faithfulness comes from verify/insitu.py (live
+# tensors) + decode_equiv (greedy tokens).  Tightened ~2.5x vs the original loose defaults,
+# with headroom over a known-correct candidate.  atol-dominated (rtol useless near zero).
 ALLCLOSE_TOL = {  # (atol, rtol) per dtype, for out
-    "bf16": (2e-2, 1e-2),
-    "fp16": (1e-2, 1e-2),
-    "fp8e4m3": (1e-1, 5e-2),
+    "bf16": (8e-3, 1e-2),
+    "fp16": (1e-3, 1e-2),
+    "fp8e4m3": (1e-1, 5e-2),   # NOT calibrated (fp8 excluded from the study) -> kept loose
 }
-LSE_TOL = (1e-2, 1e-2)  # softmax_lse is fp32
+# Mean-abs (bias) gate on out: catches systematic synthetic drift while admitting correct
+# alternative algorithms (seed bias ~1.4e-4 < these).  Live-layout drift is caught by insitu.
+MEAN_ABS_TOL = {"bf16": 5e-4, "fp16": 1e-4, "fp8e4m3": 1e-2}
+LSE_TOL = (5e-3, 1e-2)  # softmax_lse is fp32 and NOT used for token selection -> secondary gate
 
 # Perf gate: candidate must be <= PERF_TARGET_RATIO x baseline latency on ALL configs,
 # i.e. min over configs of (baseline_latency / candidate_latency) >= 1/PERF_TARGET_RATIO.

@@ -98,6 +98,9 @@ def _check_one(cfg: C.Config, namespace: str, seed: int, gc: GoldenCache) -> com
     out_err = _maxabs(cand_out_f - ref_f)
     err_ratio = out_err / (baseline_err + _EPS)
 
+    # Mean-abs bias vs baseline (systematic-drift gate; calibrated in config.MEAN_ABS_TOL).
+    bias = float((cand_out_f - base_out_f).abs().mean().item()) if cand_out_f.numel() else 0.0
+
     # lse comparison: mask out non-finite entries (fully-masked rows) on both sides.
     finite = torch.isfinite(cand_lse_f) & torch.isfinite(base_lse_f)
     if finite.any():
@@ -118,12 +121,14 @@ def _check_one(cfg: C.Config, namespace: str, seed: int, gc: GoldenCache) -> com
         lse_ok = True
 
     ratio_ok = err_ratio <= C.ERR_MULT
+    bias_ok = bias <= C.MEAN_ABS_TOL.get(cfg.dtype, 1e-2)
 
     res.out_err = out_err
     res.baseline_err = baseline_err
     res.lse_err = lse_err
     res.err_ratio = err_ratio
-    res.correct = bool(ratio_ok and allclose_ok and lse_ok)
+    res.bias = bias
+    res.correct = bool(ratio_ok and allclose_ok and lse_ok and bias_ok)
 
     if not res.correct:
         fails = []
@@ -131,6 +136,8 @@ def _check_one(cfg: C.Config, namespace: str, seed: int, gc: GoldenCache) -> com
             fails.append(f"err_ratio={err_ratio:.3f}>{C.ERR_MULT}")
         if not allclose_ok:
             fails.append(f"allclose fail (atol={atol},rtol={rtol})")
+        if not bias_ok:
+            fails.append(f"bias={bias:.3e}>{C.MEAN_ABS_TOL.get(cfg.dtype)}")
         if not lse_ok:
             fails.append(f"lse_err={lse_err:.3e}>tol")
         res.note = "; ".join(fails)[:200]

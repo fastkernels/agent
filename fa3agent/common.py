@@ -44,6 +44,7 @@ class ConfigResult:
     baseline_err: float = 0.0   # baseline-vs-fp32ref error
     lse_err: float = 0.0
     err_ratio: float = 0.0      # out_err / baseline_err (<= ERR_MULT passes)
+    bias: float = 0.0           # mean|cand_out - base_out| (systematic-drift gate)
     # perf evidence (only meaningful if correct)
     ratio: float = 0.0          # baseline_latency / candidate_latency  (>=1 == match/exceed)
     cand_latency_ms: float = 0.0

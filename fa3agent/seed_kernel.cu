@@ -58,6 +58,7 @@ struct Params {
   const int* seqused_k;     // (b) or null (paged)
   const int* page_table;    // (b, max_blocks) or null
   const float* q_descale; const float* k_descale; const float* v_descale;  // (b, hkv) or null
+  int ds_b, ds_h;           // descale strides IN ELEMENTS (broadcast-safe; 0 for stride-0 tensors)
   long q_row, q_head, k_row, k_head, v_row, v_head, o_row, o_head;
   int b, hq, hkv, hd, hdv, total_q, block_size, page_stride;
   float scale, softcap;
@@ -82,9 +83,12 @@ __global__ void attn_kernel(Params<TIn, TOut> p) {
   const int klen = p.seqused_k ? p.seqused_k[b] : (p.cu_k[b + 1] - p.cu_k[b]);
   const int q_abs = klen - sq + q_in_seq;   // causal alignment: last query <-> last key
 
-  float qd = p.q_descale ? p.q_descale[b * p.hkv + hk] : 1.f;
-  float kd = p.k_descale ? p.k_descale[b * p.hkv + hk] : 1.f;
-  float vd = p.v_descale ? p.v_descale[b * p.hkv + hk] : 1.f;
+  // Descale is stride-aware (vLLM passes a BROADCAST (b,hkv) tensor with stride [0,0] and one
+  // physical element -- dense indexing would read out of bounds). Only non-null for fp8.
+  const long ds_idx = (long)b * p.ds_b + (long)hk * p.ds_h;
+  float qd = p.q_descale ? p.q_descale[ds_idx] : 1.f;
+  float kd = p.k_descale ? p.k_descale[ds_idx] : 1.f;
+  float vd = p.v_descale ? p.v_descale[ds_idx] : 1.f;
   const float qk_scale = p.scale * qd * kd;
 
   // load q row into per-lane registers
@@ -161,6 +165,9 @@ static void launch(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v
   p.q_descale = qd ? (const float*)qd->data_ptr() : nullptr;
   p.k_descale = kd ? (const float*)kd->data_ptr() : nullptr;
   p.v_descale = vd ? (const float*)vd->data_ptr() : nullptr;
+  // Descale strides IN ELEMENTS (broadcast-safe: a (b,hkv) tensor with stride [0,0] -> 0,0).
+  p.ds_b = qd ? (int)qd->stride(0) : 0;
+  p.ds_h = qd ? (int)qd->stride(1) : 0;
   p.q_row = q.stride(0); p.q_head = q.stride(1);
   // k/v paged (nblocks, block, hkv, hd): index krow over flattened (blk*block_size+off),
   // so row stride = stride(1), head stride = stride(2). Non-paged: row stride(0), head stride(1).
@@ -210,12 +217,14 @@ std::vector<at::Tensor> mha_fwd(
   bool causal = is_causal;
 
   if (total_q > 0) {
+    // FA3 semantics: q/k/v_descale apply ONLY for fp8. For bf16/fp16 vLLM still passes a
+    // broadcast (b,hkv) stride-[0,0] descale tensor, which must be IGNORED (not read).
     if (q.scalar_type() == at::kBFloat16)
       launch<__nv_bfloat16, __nv_bfloat16>(q, k, v, out, lse, *cu_seqlens_q, cu_seqlens_k, seqused_k, page_table,
-        q_descale, k_descale, v_descale, b, hq, hkv, hd, hdv, total_q, softmax_scale, softcap, win_l, win_r, causal, stream);
+        std::nullopt, std::nullopt, std::nullopt, b, hq, hkv, hd, hdv, total_q, softmax_scale, softcap, win_l, win_r, causal, stream);
     else if (q.scalar_type() == at::kHalf)
       launch<__half, __half>(q, k, v, out, lse, *cu_seqlens_q, cu_seqlens_k, seqused_k, page_table,
-        q_descale, k_descale, v_descale, b, hq, hkv, hd, hdv, total_q, softmax_scale, softcap, win_l, win_r, causal, stream);
+        std::nullopt, std::nullopt, std::nullopt, b, hq, hkv, hd, hdv, total_q, softmax_scale, softcap, win_l, win_r, causal, stream);
     else if (is_fp8)
       launch<__nv_fp8_e4m3, __nv_bfloat16>(q, k, v, out, lse, *cu_seqlens_q, cu_seqlens_k, seqused_k, page_table,
         q_descale, k_descale, v_descale, b, hq, hkv, hd, hdv, total_q, softmax_scale, softcap, win_l, win_r, causal, stream);
