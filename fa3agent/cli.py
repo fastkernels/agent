@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import sys
 import time
@@ -49,6 +50,62 @@ def cmd_list(a):
     return 0
 
 
+_SPARK = "▁▂▃▄▅▆▇█"
+
+
+def _spark(vals, lo=0.0, hi=1.2):
+    out = []
+    for v in vals:
+        v = max(lo, min(hi, v or 0.0))
+        out.append(_SPARK[min(len(_SPARK) - 1, int((v - lo) / (hi - lo + 1e-9) * (len(_SPARK) - 1)))])
+    return "".join(out)
+
+
+def _fmt_row(r: dict) -> str:
+    ev = r.get("eval") or {}
+    pf = r.get("profile") or {}
+    insitu = ev.get("insitu") or {}
+    de = ev.get("decode_equiv_ok")
+    ins = "-" if not insitu else ("ok" if insitu.get("ok") else ("skip" if insitu.get("skip") else "FAIL"))
+    dec = "-" if de is None else ("ok" if de else "DIVERGE")
+    return (f"{r.get('step'):>4} {r.get('status',''):<13} "
+            f"min={ev.get('min_ratio',0):>5.3f} geo={ev.get('geomean_ratio',0):>5.3f} "
+            f"insitu={ins:<5} decode={dec:<7} {'★' if r.get('is_best') else ' '} "
+            f"{(pf.get('bottleneck','') or '')[:46]}")
+
+
+def cmd_watch(a):
+    import time
+    run_id = a.run_id or _latest_run()
+    if not run_id:
+        print("no run to watch"); return 2
+    jsonl = os.path.join(C.CHECKPOINT_ROOT, run_id, "candidates.jsonl")
+    print(f"watching {run_id}  ({jsonl})")
+    print(f"{'step':>4} {'status':<13} {'minratio':<9} {'geomean':<9} {'insitu':<11} {'decode':<11} best bottleneck")
+    seen = 0
+    mins = []
+    while True:
+        rows = []
+        if os.path.exists(jsonl):
+            with open(jsonl) as f:
+                rows = [l for l in f.read().splitlines() if l.strip()]
+        for line in rows[seen:]:
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            print(_fmt_row(r), flush=True)
+            mins.append((r.get("eval") or {}).get("min_ratio", 0.0))
+        if len(rows) > seen:
+            seen = len(rows)
+            if len(mins) > 1:
+                print(f"     min-ratio trend: {_spark(mins)}  (parity=1.0; best={max(mins):.3f})", flush=True)
+        if a.once:
+            return 0
+        time.sleep(a.interval)
+
+
+
 def cmd_validate(a):
     import subprocess
     tests = sorted(glob.glob(os.path.join(C.PKG_DIR, "tests", "test_*.py")))
@@ -81,6 +138,12 @@ def main(argv=None):
 
     sub.add_parser("list", help="list runs").set_defaults(func=cmd_list)
     sub.add_parser("validate", help="run per-component smoke tests").set_defaults(func=cmd_validate)
+
+    w = sub.add_parser("watch", help="live per-step table from a run's candidates.jsonl")
+    w.add_argument("--run-id", default=None, help="run to watch (default: latest)")
+    w.add_argument("--once", action="store_true", help="print current table and exit")
+    w.add_argument("--interval", type=float, default=3.0, help="poll interval seconds")
+    w.set_defaults(func=cmd_watch)
 
     a = ap.parse_args(argv)
     return a.func(a)

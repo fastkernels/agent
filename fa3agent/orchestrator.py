@@ -140,8 +140,15 @@ class Orchestrator:
                 focus=focus,
                 supervisor_note=self._supervisor_note)
 
+        brain_log = os.path.join(checkpoint.build_dir(self.run_id, cid), "brain.log")
+        mode = "bootstrap" if best is None else f"refine (focus #{step % len(prompts.FOCUS_LEVERS)})"
+        self._log(f"[gen] invoking brain ({self.model}, effort={self.effort}) {mode}; "
+                  f"streaming -> {brain_log}")
+        t0 = time.time()
         res = llm.run_claude(prompt, cwd=C.REPO_ROOT, model=self.model, effort=self.effort,
-                             session_id=session_id)
+                             session_id=session_id, stream_log=brain_log)
+        self._log(f"[gen] brain returned in {time.time()-t0:.0f}s (ok={res.ok}); "
+                  f"candidate {'written' if os.path.exists(cand_path) else 'MISSING'}")
         # If the brain didn't produce a file, bootstrap from the seed (guarantees a candidate).
         if not os.path.exists(cand_path):
             if best is None and os.path.exists(os.path.join(C.PKG_DIR, "seed_kernel.cu")):
@@ -159,6 +166,7 @@ class Orchestrator:
         ev = EvalResult(num_configs=len(self.cfgs))
         profile = {}
         # CORRECTNESS FIRST
+        self._log(f"[correctness] checking {len(self.cfgs)} configs (synthetic pre-filter)...")
         try:
             cres = self.comp["check_correctness"](ns, self.cfgs, seed=self.seed, gpu_id=self.pool.gpu_ids[0])
         except Exception as e:
@@ -168,13 +176,20 @@ class Orchestrator:
         ev.num_correct = sum(1 for r in cres if r.correct)
         ev.correct = ev.num_correct == len(self.cfgs)
         if not ev.correct:
+            bad = [r.config for r in cres if not r.correct][:6]
+            self._log(f"[correctness] {ev.num_correct}/{len(self.cfgs)} passed; failing: {bad}")
             return ev, profile  # never profile/perf an incorrect kernel
+        self._log(f"[correctness] {ev.num_correct}/{len(self.cfgs)} passed")
 
         # PERF (one kernel per GPU at a time)
         if self.comp.get("measure"):
+            self._log(f"[perf] measuring {len(self.cfgs)} configs (1 kernel/GPU across {len(self.pool.gpu_ids)})...")
             def _meas(cfg, gpu):
                 try:
-                    return self.comp["measure"](ns, cfg, gpu)
+                    r = self.comp["measure"](ns, cfg, gpu)
+                    self._log(f"[perf]   {cfg.name}: ratio={r.ratio:.3f} "
+                              f"(cand {r.cand_latency_ms:.3f}ms / base {r.base_latency_ms:.3f}ms) gpu{gpu}")
+                    return r
                 except Exception as e:
                     return ConfigResult(config=cfg.name, correct=True, ratio=0.0, note=f"measure err: {e!r}")
             perf = self.pool.map_exclusive(_meas, self.cfgs)
@@ -194,8 +209,10 @@ class Orchestrator:
             worst = min(ev.per_config, key=lambda r: (r.ratio if r.ratio > 0 else 1e9))
             wcfg = next((c for c in self.cfgs if c.name == worst.config), self.cfgs[0])
             gpu = self.pool.gpu_ids[0]
+            self._log(f"[ncu] profiling worst config '{wcfg.name}' on gpu{gpu} (out-of-process)...")
             with self.pool.exclusive(gpu):
                 profile = self._profile_subprocess(so_path, ns, wcfg.name, gpu)
+            self._log(f"[ncu] bottleneck: {(profile or {}).get('bottleneck','(none)')[:140]}")
 
         # NOTE: the faithful vLLM gates (in-situ A/B, then full decode-equality) are run at the
         # PROMOTION tier in run(), not here -- they need a model load and only matter for a
@@ -227,15 +244,17 @@ class Orchestrator:
 
         # build
         bdir = checkpoint.build_dir(self.run_id, cid)
+        self._log(f"[build] compiling {cid} (toolkit-only, sm_90a)...")
         br: BuildResult = self.comp["build_candidate"](cand_path, ns, bdir)
         rec.build = asdict(br)
         if not br.ok:
             rec.status = "build_failed"
-            self._log(f"[build] FAILED: {br.error[:300]}")
+            self._log(f"[build] FAILED ({br.duration_s:.0f}s): {br.error[:300]}")
             self._distill(rec, f"Build failed: {br.error[:400]}", ntype="ks")
             if br.env_fatal:
                 rec.status = "env_fatal"
             return rec
+        self._log(f"[build] ok ({br.duration_s:.0f}s) -> {os.path.basename(br.so_path or '')}")
 
         # anti-cheat (binary)
         if self.comp.get("anticheat"):
@@ -243,6 +262,7 @@ class Orchestrator:
             rec.anticheat = asdict(ac2)
             if not ac2.ok:
                 rec.status = "cheat"
+                self._log(f"[anticheat] REJECT (binary): {ac2.violations}")
                 self._distill(rec, f"Anti-cheat (binary) rejected: {ac2.violations}", ntype="alg")
                 return rec
 
