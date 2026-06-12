@@ -66,6 +66,9 @@ DISTILLED info, not dumps):
   (query,head), online softmax, fp32 accumulate). Read it to understand the host/registration
   boilerplate and the exact tensor layouts/strides.
 - SASS oracle / analysis (after a build): fa3agent.sass.analyze.analyze, fa3agent.sass.cutlass_oracle.build_oracle.
+- Sanitizer (after you build a .so to test): a BOUNDED compute-sanitizer wrapper — prefer it over raw
+  compute-sanitizer (returns {clean, num_errors, errors[<=5]}, not the raw dump):
+    python -c "from fa3agent.verify.sanitizer import run_sanitizer; from fa3agent import config as C; print(run_sanitizer('<built.so>', '<namespace>', C.DEV_CONFIGS[2], tool='memcheck'))"
 Do NOT run the build or the eval yourself — the driver compiles, anti-cheat-scans, checks
 CORRECTNESS FIRST, then profiles, and feeds you distilled results next round.
 """
@@ -96,7 +99,8 @@ Then STOP. The driver will build + anti-cheat-scan + verify correctness and repo
 
 def refine_prompt(candidate_path: str, best_path: str, last_eval_summary: str,
                   profile_feedback: str, knowledge_hints: str, focus: str,
-                  supervisor_note: str = "", doc_hints: str = "") -> str:
+                  supervisor_note: str = "", doc_hints: str = "",
+                  sass_feedback: str = "", knowledge_notes: str = "") -> str:
     return f"""\
 You are optimizing a Hopper FlashAttention-3 kernel (single self-contained .cu). Continue from
 the current CHAMPION at {best_path} (read it). Make TARGETED edits unless you have a concrete
@@ -110,10 +114,15 @@ LAST EVAL: {last_eval_summary}
 
 PROFILER FEEDBACK (distilled, NCU): {profile_feedback or "(none yet)"}
 
+SASS (your kernel's instruction mix — wgmma/TMA presence, register spills): {sass_feedback or "(none)"}
+
 RELEVANT NVIDIA DOCS (auto-retrieved for the above bottleneck; query docs.retrieve for more, or open the file for a full section):
 {doc_hints or "(none — query docs.retrieve yourself for exact PTX syntax/layout, e.g. with scope='parallel-thread-execution.md')"}
 
-KNOWLEDGE / HINTS (from the typed knowledge base + reference libs): {knowledge_hints or "(query the knowledge base yourself)"}
+REFERENCE-LIB HINTS (pure-PTX models for wgmma/TMA/mbarrier/softmax): {knowledge_hints or "(query reflib.get_hints yourself)"}
+
+LEARNED NOTES (distilled from THIS run's knowledge base; query it for more):
+{knowledge_notes or "(none yet — query the knowledge base yourself)"}
 
 SUGGESTED FOCUS: {focus}
 {("SUPERVISOR: " + supervisor_note) if supervisor_note else ""}

@@ -51,6 +51,43 @@ def _doc_query(focus: str, bottleneck: str) -> str:
     return (focus + " " + bt).strip()
 
 
+def _sass_line(s) -> str:
+    """Distill a sass.analyze result dict to one prompt line (kernel instruction-mix verdict)."""
+    if not isinstance(s, dict) or not s.get("ok"):
+        return ""
+    summ = s.get("summary") or {}
+    v = summ.get("verdict")
+    if isinstance(v, list):
+        v = "; ".join(str(x) for x in v)
+    line = str(v) if v else ""
+    bd = s.get("baseline_diff") or []
+    if bd:
+        line += (" | " if line else "") + "vs baseline: " + " | ".join(str(x) for x in bd[:2])
+    return line[:300]
+
+
+def _knowledge_line(notes) -> str:
+    """Distill knowledge-store query results to a short injected block (top notes)."""
+    out = []
+    for n in (notes or [])[:3]:
+        out.append(f"[{n.get('id', '?')}] {n.get('title', '')}: {n.get('snippet', '')}")
+    return "\n".join(out)[:1500]
+
+
+def _looks_like_mem_bug(ev) -> bool:
+    """True when a correctness failure smells like a memory bug worth a sanitizer pass."""
+    if getattr(ev, "error", ""):
+        return True
+    pats = ("nan", "inf", "illegal", "out of bound", "out-of-bound", "misalign", "shape",
+            "mismatch", "address", "fault")
+    for r in getattr(ev, "per_config", []) or []:
+        if not getattr(r, "correct", True):
+            note = (getattr(r, "note", "") or "").lower()
+            if any(p in note for p in pats):
+                return True
+    return False
+
+
 class Orchestrator:
     def __init__(self, run_id: str, config_set: str = "dev", max_steps: Optional[int] = None,
                  model: Optional[str] = None, effort: Optional[str] = None, seed: int = 0,
@@ -150,6 +187,7 @@ class Orchestrator:
         else:
             bottleneck = (prev.get("profile", {}) or {}).get("bottleneck", "") if prev else ""
             focus = prompts.FOCUS_LEVERS[step % len(prompts.FOCUS_LEVERS)]
+            dq = _doc_query(focus, bottleneck)
             kh = ""
             try:
                 if self.comp.get("get_hints"):
@@ -162,14 +200,25 @@ class Orchestrator:
             dh = ""
             try:
                 if self.comp.get("retrieve"):
-                    dh = self.comp["retrieve"](_doc_query(focus, bottleneck), k=2) or ""
+                    dh = self.comp["retrieve"](dq, k=2) or ""
             except Exception:
                 pass
+            # Feed the run's OWN distilled knowledge back in -- the brain rarely queries the store
+            # itself, so inject the top notes keyed to the same focus+bottleneck query.
+            kn = ""
+            try:
+                if self.kstore:
+                    kn = _knowledge_line(self.kstore.query(dq, k=3))
+            except Exception:
+                pass
+            sass_fb = _sass_line(prev.get("sass")) if prev else ""
             prompt = prompts.refine_prompt(
                 cand_path, self.paths["best"],
                 last_eval_summary=(prev.get("eval", {}) or {}).get("__summary__", str(prev.get("status"))) if prev else "n/a",
                 profile_feedback=bottleneck,
+                sass_feedback=sass_fb,
                 knowledge_hints=kh[:1500],
+                knowledge_notes=kn,
                 doc_hints=dh[:3000],
                 focus=focus,
                 supervisor_note=self._supervisor_note)
@@ -318,8 +367,41 @@ class Orchestrator:
                 self._distill(rec, f"Anti-cheat (binary) rejected: {ac2.violations}", ntype="alg")
                 return rec
 
+        # SASS analysis of the built kernel (its own instruction mix: wgmma/TMA presence, register
+        # spills) -- run once per successful build, independent of correctness; distilled into the
+        # next refine prompt.  cuobjdump-only (no GPU); bounded inside sass.analyze.
+        if self.comp.get("sass_analyze") and br.so_path:
+            try:
+                rec.sass = self.comp["sass_analyze"](br.so_path, ns)
+            except Exception as e:  # noqa - best-effort
+                rec.sass = {"ok": False, "error": repr(e)}
+            sl = _sass_line(rec.sass)
+            if sl:
+                self._log(f"[sass] {sl[:150]}")
+
         ev, profile = self._evaluate(step, cid, ns, br.so_path)
+
+        # Sanitizer (memcheck) ONLY when a built kernel fails correctness in a way that smells like a
+        # memory bug (raised / NaN-inf / illegal / shape) -- a bounded report instead of leaving the
+        # brain to run raw compute-sanitizer.
+        san = None
+        if (self.comp.get("run_sanitizer") and br.so_path and not ev.correct
+                and _looks_like_mem_bug(ev)):
+            cfg0 = min(self.cfgs, key=lambda c: sum(q * k for q, k in c.requests) * c.num_heads_q)
+            self._log(f"[sanitizer] suspected memory bug -> memcheck on {cfg0.name}...")
+            try:
+                with self.pool.exclusive(self.pool.gpu_ids[0]):
+                    san = self.comp["run_sanitizer"](br.so_path, ns, cfg0, tool="memcheck")
+                self._log(f"[sanitizer] clean={san.get('clean')} errors={san.get('num_errors')}: "
+                          f"{((san.get('errors') or ['-'])[0] or '')[:80]}")
+            except Exception as e:  # noqa
+                san = {"clean": None, "note": f"sanitizer error: {e!r}"}
+
         ev_d = asdict(ev); ev_d["__summary__"] = ev.summary()
+        if san is not None:
+            ev_d["sanitizer"] = san
+            ev_d["__summary__"] += (f" | sanitizer(memcheck): clean={san.get('clean')} "
+                                    f"n_err={san.get('num_errors')}")
         rec.eval = ev_d
         rec.profile = profile
         rec.status = "correct" if ev.correct else "incorrect"

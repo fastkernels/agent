@@ -230,11 +230,19 @@ class Config:
     q_len: int = 1            # per-sequence query length (decode=1; prefill=prompt len)
     k_len: int = 256          # per-sequence kv/context length
     head_dim_v: Optional[int] = None  # defaults to head_dim
+    mix: Optional[tuple] = None        # ((q_len,k_len),...) ragged/MIXED batch; overrides batch/q_len/k_len
     weight: float = 1.0       # perf weight (hot configs weigh more in the geomean)
 
     @property
     def hdv(self) -> int:
         return self.head_dim_v if self.head_dim_v is not None else self.head_dim
+
+    @property
+    def requests(self):
+        """Per-request (q_len, k_len). Uniform (`batch` copies) unless `mix` is set (ragged/mixed)."""
+        if self.mix:
+            return [(int(q), int(k)) for q, k in self.mix]
+        return [(self.q_len, self.k_len)] * self.batch
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -256,13 +264,15 @@ DEV_CONFIGS = [
 # --- FULL set: complete correctness + perf coverage of what vLLM exercises -----------
 def _full_configs() -> list[Config]:
     cfgs: list[Config] = []
-    # head-dim sweep, bf16, decode + prefill, paged, GQA 8:2, causal
-    for hd in (64, 96, 128, 192, 256):
-        w = _HOT if hd == 128 else 1.0
+    # head-dim coverage at the non-128 dims, bf16, decode + prefill, paged, GQA 8:2, causal.
+    # hd128 is OMITTED here: it's covered at realistic Llama-3.1-8B head counts (32Q/8KV) and
+    # production-scale shapes in the block below, so the small-head hd128 sweep entries would be
+    # low-fidelity duplicates.
+    for hd in (64, 96, 192, 256):
         cfgs.append(Config(f"decode_hd{hd}_bf16_gqa", "decode", "bf16", hd, 8, 2,
-                           batch=8, q_len=1, k_len=1024, weight=w))
+                           batch=8, q_len=1, k_len=1024))
         cfgs.append(Config(f"prefill_hd{hd}_bf16_causal", "prefill", "bf16", hd, 8, 2,
-                           paged=True, batch=2, q_len=1024, k_len=1024, weight=w))
+                           paged=True, batch=2, q_len=1024, k_len=1024))
     # fp16 + fp8 dtype coverage at hd128
     cfgs.append(Config("decode_hd128_fp16_gqa", "decode", "fp16", 128, 8, 2,
                        batch=8, q_len=1, k_len=1024))
@@ -283,6 +293,44 @@ def _full_configs() -> list[Config]:
                        batch=8, q_len=1, k_len=1024))
     cfgs.append(Config("prefill_hd128_bf16_noncausal", "prefill", "bf16", 128, 8, 2,
                        paged=True, causal=False, batch=2, q_len=512, k_len=512))
+
+    # --- production-scale shapes at realistic Llama-3.1-8B head counts (32Q / 8KV = 4:1) ------
+    # The block above uses small head counts (8Q/2KV); these match a real served model so grid
+    # occupancy / split-KV decisions are tuned for the production regime, and push seqlen/batch
+    # toward what vLLM (and the vLLM-FA test/bench suite) actually exercises.
+    #
+    # Long-context decode -- the memory-bound regime + the split-KV heuristic (vFA benches to 128K).
+    cfgs.append(Config("decode_hd128_bf16_longctx16k", "decode", "bf16", 128, 32, 8,
+                       batch=8, q_len=1, k_len=16384, weight=_HOT))
+    cfgs.append(Config("decode_hd128_bf16_longctx32k", "decode", "bf16", 128, 32, 8,
+                       batch=4, q_len=1, k_len=32768))
+    # Large concurrent decode batch (vLLM default max_num_seqs = 128).
+    cfgs.append(Config("decode_hd128_bf16_bigbatch", "decode", "bf16", 128, 32, 8,
+                       batch=128, q_len=1, k_len=2048, weight=_HOT))
+    # Speculative-decode / MTP: q_len > 1 decode (the packed-GQA path).
+    cfgs.append(Config("decode_hd128_bf16_spec", "decode", "bf16", 128, 32, 8,
+                       batch=8, q_len=4, k_len=4096))
+    # Chunked-prefill chunk attending a long prior context (q << k); paged.
+    cfgs.append(Config("prefill_hd128_bf16_chunk16k", "prefill", "bf16", 128, 32, 8,
+                       paged=True, batch=2, q_len=2048, k_len=16384, weight=_HOT))
+    # MIXED chunked-prefill batch: many decodes + a prefill chunk in ONE ragged varlen call -- the
+    # dominant vLLM-V1 call pattern (chunked prefill on by default).  Ragged via `mix`.
+    cfgs.append(Config("mixed_chunked_hd128_bf16", "prefill", "bf16", 128, 32, 8, paged=True,
+                       weight=_HOT,
+                       mix=tuple([(1, 8192), (1, 4096), (1, 2048), (1, 1024)] * 4 + [(1024, 1024)])))
+    # Gemma-2 shape: hd256 + logit softcap + sliding window, together.
+    cfgs.append(Config("decode_hd256_bf16_gemma2", "decode", "bf16", 256, 16, 8,
+                       batch=8, q_len=1, k_len=4096, softcap=50.0, window_left=4096, window_right=0))
+    # vLLM uses block_size 16 AND 32.
+    cfgs.append(Config("decode_hd128_bf16_blk32", "decode", "bf16", 128, 32, 8,
+                       batch=8, q_len=1, k_len=2048, block_size=32))
+    # head_dim_v != head_dim (the vFA has_qv / MLA-style different value dim).
+    cfgs.append(Config("decode_hd192_bf16_diffv", "decode", "bf16", 192, 16, 2,
+                       batch=8, q_len=1, k_len=2048, head_dim_v=128))
+    # NOTE: a bf16-query + fp8-KV-cache config was tried but the FA3 op requires q.dtype == k.dtype
+    # (GPU smoke-tested: "query and key must have the same dtype"), so at the op boundary fp8 means
+    # ALL-fp8 -- already covered by decode_hd128_fp8_gqa / prefill_hd128_fp8_causal above, which now
+    # carry realistic non-unit descales (see shapes.make_inputs).
     return cfgs
 
 FULL_CONFIGS = _full_configs()

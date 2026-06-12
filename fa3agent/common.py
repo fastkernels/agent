@@ -109,6 +109,7 @@ class StepRecord:
     anticheat: Optional[dict] = None
     eval: Optional[dict] = None
     profile: Optional[dict] = None
+    sass: Optional[dict] = None
     knowledge_note: Optional[str] = None
     session_id: Optional[str] = None   # Claude headless session for resume continuity
     is_best: bool = False

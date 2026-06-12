@@ -49,50 +49,73 @@ def _torch_dtype(name: str) -> torch.dtype:
     return getattr(torch, C.TORCH_DTYPE[name])
 
 
+def _cumsum0(xs: list[int]) -> list[int]:
+    out, s = [0], 0
+    for x in xs:
+        s += int(x)
+        out.append(s)
+    return out
+
+
 def make_inputs(cfg: C.Config, seed: int = 0, device: str = "cuda") -> Inputs:
-    """Construct identical, deterministic inputs for a config."""
+    """Construct identical, deterministic inputs for a config (uniform OR ragged/mixed `mix`).
+
+    Q/K/V all use cfg.dtype.  fp8 tensors get deterministic NON-trivial per-(request, kv-head)
+    descales (mirroring vLLM's per-tensor scales) so the dequant arithmetic is actually exercised.
+    The uniform non-fp8 path is byte-identical to the previous builder.
+    """
     g = torch.Generator(device=device).manual_seed(seed)
-    dt = _torch_dtype(cfg.dtype)
     is_fp8 = cfg.dtype == "fp8e4m3"
-    gen_dt = torch.bfloat16 if is_fp8 else dt  # generate in bf16 then cast to fp8
+    gen = torch.bfloat16 if is_fp8 else _torch_dtype(cfg.dtype)   # generate in bf16, then cast to fp8
 
-    b, hq, hkv, hd, hdv = cfg.batch, cfg.num_heads_q, cfg.num_heads_kv, cfg.head_dim, cfg.hdv
-    q_len, k_len, block = cfg.q_len, cfg.k_len, cfg.block_size
-    total_q = b * q_len
+    hq, hkv, hd, hdv, block = cfg.num_heads_q, cfg.num_heads_kv, cfg.head_dim, cfg.hdv, cfg.block_size
+    reqs = cfg.requests                          # [(q_len, k_len), ...]; uniform = batch copies
+    q_lens = [q for q, _ in reqs]
+    k_lens = [k for _, k in reqs]
+    b = len(reqs)
+    total_q = sum(q_lens)
 
-    q = torch.randn(total_q, hq, hd, generator=g, device=device, dtype=gen_dt)
-    cu_q = torch.arange(0, (b + 1) * q_len, q_len, device=device, dtype=torch.int32)
+    q = torch.randn(total_q, hq, hd, generator=g, device=device, dtype=gen)
+    cu_q = torch.tensor(_cumsum0(q_lens), device=device, dtype=torch.int32)
     softmax_scale = hd ** -0.5
 
-    qd = kd = vd = None
     if cfg.paged:
-        nblocks_per = (k_len + block - 1) // block
-        total_blocks = b * nblocks_per + 4
-        kc = torch.randn(total_blocks, block, hkv, hd, generator=g, device=device, dtype=gen_dt)
-        vc = torch.randn(total_blocks, block, hkv, hdv, generator=g, device=device, dtype=gen_dt)
-        page_table = torch.arange(b * nblocks_per, device=device, dtype=torch.int32).reshape(b, nblocks_per)
-        seqused_k = torch.full((b,), k_len, device=device, dtype=torch.int32)
+        nbp = [(k + block - 1) // block for k in k_lens]
+        total_blocks = sum(nbp) + 4
+        k = torch.randn(total_blocks, block, hkv, hd, generator=g, device=device, dtype=gen)
+        v = torch.randn(total_blocks, block, hkv, hdv, generator=g, device=device, dtype=gen)
+        page_table = torch.zeros(b, max(nbp), device=device, dtype=torch.int32)
+        nb = 0
+        for i, nbi in enumerate(nbp):
+            page_table[i, :nbi] = torch.arange(nb, nb + nbi, device=device, dtype=torch.int32)
+            nb += nbi
+        seqused_k = torch.tensor(k_lens, device=device, dtype=torch.int32)
         cu_k = None
-        k, v = kc, vc
     else:
-        total_k = b * k_len
-        k = torch.randn(total_k, hkv, hd, generator=g, device=device, dtype=gen_dt)
-        v = torch.randn(total_k, hkv, hdv, generator=g, device=device, dtype=gen_dt)
-        cu_k = torch.arange(0, (b + 1) * k_len, k_len, device=device, dtype=torch.int32)
+        total_k = sum(k_lens)
+        k = torch.randn(total_k, hkv, hd, generator=g, device=device, dtype=gen)
+        v = torch.randn(total_k, hkv, hdv, generator=g, device=device, dtype=gen)
+        cu_k = torch.tensor(_cumsum0(k_lens), device=device, dtype=torch.int32)
         seqused_k = None
         page_table = None
 
+    qd = kd = vd = None
     if is_fp8:
-        f8 = torch.float8_e4m3fn
-        q = q.to(f8); k = k.to(f8); v = v.to(f8)
+        q = q.to(torch.float8_e4m3fn)
+        k = k.to(torch.float8_e4m3fn)
+        v = v.to(torch.float8_e4m3fn)
         ds = (b, hkv)
-        qd = torch.ones(ds, device=device, dtype=torch.float32)
-        kd = torch.ones(ds, device=device, dtype=torch.float32)
-        vd = torch.ones(ds, device=device, dtype=torch.float32)
+
+        def _descale():  # deterministic non-trivial scale in [0.75, 1.25) per (request, kv-head)
+            return torch.rand(ds, generator=g, device=device, dtype=torch.float32) * 0.5 + 0.75
+
+        qd = _descale()
+        kd = _descale()
+        vd = _descale()
 
     return Inputs(cfg=cfg, q=q, k=k, v=v, cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
                   seqused_k=seqused_k, page_table=page_table,
-                  max_seqlen_q=q_len, max_seqlen_k=k_len, softmax_scale=softmax_scale,
+                  max_seqlen_q=max(q_lens), max_seqlen_k=max(k_lens), softmax_scale=softmax_scale,
                   q_descale=qd, k_descale=kd, v_descale=vd)
 
 
@@ -131,52 +154,63 @@ def call_fwd(namespace: str, inp: Inputs, out: Optional[torch.Tensor] = None):
 def ref_fp32(inp: Inputs) -> torch.Tensor:
     """Pure-PyTorch fp32 reference attention for the 2x-error correctness criterion.
 
-    Handles GQA/MQA, causal, sliding window, softcap, paged + non-paged KV.
-    Returns out in fp32, shape (total_q, num_heads_q, head_dim_v). Slow oracle only.
+    Handles GQA/MQA, causal, sliding window, softcap, paged + non-paged KV, fp8 descales (Q and/or
+    KV), head_dim_v != head_dim, and ragged/MIXED batches (`mix`).  Returns out in fp32, shape
+    (total_q, num_heads_q, head_dim_v).  Slow per-request oracle only.
+
+    Query positions are the LAST q_len tokens of the k_len-long sequence (decode/append/chunk
+    semantics), so the causal diagonal is offset by (k_len - q_len) -- matching FA's varlen path.
     """
     cfg = inp.cfg
-    b, hq, hkv, hd, hdv = cfg.batch, cfg.num_heads_q, cfg.num_heads_kv, cfg.head_dim, cfg.hdv
-    q_len, k_len = cfg.q_len, cfg.k_len
+    hq, hkv, hd, hdv = cfg.num_heads_q, cfg.num_heads_kv, cfg.head_dim, cfg.hdv
     rep = hq // hkv
     dev = inp.q.device
+    block = cfg.block_size
+    reqs = cfg.requests
+    k_lens = [k for _, k in reqs]
 
-    q = inp.q.to(torch.float32).view(b, q_len, hq, hd)
-    if cfg.paged:
-        block = cfg.block_size
-        nbp = (k_len + block - 1) // block
-        kfull = inp.k.to(torch.float32)  # (nblocks, block, hkv, hd)
-        vfull = inp.v.to(torch.float32)
-        K = torch.empty(b, k_len, hkv, hd, device=dev, dtype=torch.float32)
-        V = torch.empty(b, k_len, hkv, hdv, device=dev, dtype=torch.float32)
-        pt = inp.page_table
-        for bi in range(b):
-            fk = kfull[pt[bi, :nbp].long()].reshape(nbp * block, hkv, hd)
-            fv = vfull[pt[bi, :nbp].long()].reshape(nbp * block, hkv, hdv)
-            K[bi] = fk[:k_len]; V[bi] = fv[:k_len]
-    else:
-        K = inp.k.to(torch.float32).view(b, k_len, hkv, hd)
-        V = inp.v.to(torch.float32).view(b, k_len, hkv, hdv)
-
-    out = torch.empty(b, q_len, hq, hdv, device=dev, dtype=torch.float32)
+    qf = inp.q.to(torch.float32)        # (total_q, hq, hd)
+    kf = inp.k.to(torch.float32)        # paged: (nblk, block, hkv, hd); else (total_k, hkv, hd)
+    vf = inp.v.to(torch.float32)
+    out = torch.empty(qf.shape[0], hq, hdv, device=dev, dtype=torch.float32)
     scale = inp.softmax_scale
-    qpos = torch.arange(k_len - q_len, k_len, device=dev).view(1, q_len, 1)
-    kpos = torch.arange(k_len, device=dev).view(1, 1, k_len)
-    mask = torch.zeros(1, q_len, k_len, device=dev, dtype=torch.bool)
-    if cfg.causal:
-        mask = mask | (kpos > qpos)
-    if cfg.window_left >= 0:
-        mask = mask | (kpos < (qpos - cfg.window_left))
-    if cfg.window_right >= 0:
-        mask = mask | (kpos > (qpos + cfg.window_right))
-    for h in range(hq):
-        hk = h // rep
-        qi = q[:, :, h, :]
-        ki = K[:, :, hk, :]
-        vi = V[:, :, hk, :]
-        s = torch.einsum("bqd,bkd->bqk", qi, ki) * scale
-        if cfg.softcap and cfg.softcap > 0:
-            s = cfg.softcap * torch.tanh(s / cfg.softcap)
-        s = s.masked_fill(mask, float("-inf"))
-        p = torch.softmax(s, dim=-1)
-        out[:, :, h, :] = torch.einsum("bqk,bkd->bqd", p, vi)
-    return out.reshape(b * q_len, hq, hdv)
+
+    q_off = 0
+    for bi, (ql, kl) in enumerate(reqs):
+        qi = qf[q_off:q_off + ql]       # (ql, hq, hd)
+        if inp.q_descale is not None:   # fp8 query -> dequant (per kv-head, expanded to q-heads)
+            qi = qi * inp.q_descale[bi].repeat_interleave(rep).view(1, hq, 1)
+        if cfg.paged:
+            nbp = (kl + block - 1) // block
+            pt = inp.page_table[bi, :nbp].long()
+            Ki = kf[pt].reshape(nbp * block, hkv, hd)[:kl]      # (kl, hkv, hd)
+            Vi = vf[pt].reshape(nbp * block, hkv, hdv)[:kl]
+        else:
+            koff = sum(k_lens[:bi])
+            Ki = kf[koff:koff + kl]
+            Vi = vf[koff:koff + kl]
+        if inp.k_descale is not None:
+            Ki = Ki * inp.k_descale[bi].view(1, hkv, 1)
+        if inp.v_descale is not None:
+            Vi = Vi * inp.v_descale[bi].view(1, hkv, 1)
+
+        qpos = torch.arange(kl - ql, kl, device=dev).view(ql, 1)
+        kpos = torch.arange(kl, device=dev).view(1, kl)
+        mask = torch.zeros(ql, kl, device=dev, dtype=torch.bool)
+        if cfg.causal:
+            mask |= kpos > qpos
+        if cfg.window_left >= 0:
+            mask |= kpos < (qpos - cfg.window_left)
+        if cfg.window_right >= 0:
+            mask |= kpos > (qpos + cfg.window_right)
+
+        for h in range(hq):
+            hk = h // rep
+            s = torch.einsum("qd,kd->qk", qi[:, h, :], Ki[:, hk, :]) * scale
+            if cfg.softcap and cfg.softcap > 0:
+                s = cfg.softcap * torch.tanh(s / cfg.softcap)
+            s = s.masked_fill(mask, float("-inf"))
+            p = torch.softmax(s, dim=-1)
+            out[q_off:q_off + ql, h, :] = torch.einsum("qk,kd->qd", p, Vi[:, hk, :])
+        q_off += ql
+    return out
