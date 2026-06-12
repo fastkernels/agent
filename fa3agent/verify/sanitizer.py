@@ -22,6 +22,7 @@ import tempfile
 from typing import Optional
 
 from .. import config as C
+from ..runlog import logged
 
 # Sanitizer tools we support.  All take `--tool <name>`.
 _VALID_TOOLS = ("memcheck", "racecheck", "initcheck", "synccheck")
@@ -131,6 +132,7 @@ def _parse(stdout: str, stderr: str) -> tuple[bool, int, list[str], Optional[str
     return clean, num_errors, uniq[:_MAX_ERRORS], None
 
 
+@logged("sanitizer")
 def run_sanitizer(so_path: str, namespace: str, cfg: C.Config,
                   tool: str = "memcheck") -> dict:
     """Run ONE forward of `cfg` under compute-sanitizer `tool`; return a distilled dict.

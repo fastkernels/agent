@@ -33,6 +33,7 @@ from typing import Optional
 
 from fa3agent import config
 from fa3agent.sass import analyze as sass_analyze
+from fa3agent.runlog import logged
 
 GENCODE_ARCH = config.GPU_ARCH  # "sm_90a"
 NVCC = shutil.which("nvcc") or "/usr/local/cuda/bin/nvcc"
@@ -253,6 +254,7 @@ def _try_nvcc_wgmma(cfg, work_dir: str) -> Optional[dict]:
     return {"cubin_path": cubin}
 
 
+@logged("cutlass_oracle")
 def build_oracle(cfg, work_dir: str) -> dict:
     """Build a minimal Hopper reference out of band and distill its SASS/PTX.
 

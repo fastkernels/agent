@@ -25,6 +25,7 @@ from typing import Optional
 
 from .. import common
 from .. import config as C
+from ..runlog import logged
 
 _MAX_VIOLATIONS = 30          # bound the violations list (context discipline)
 _NM_LDD_TIMEOUT = 60          # seconds per binary-scan subprocess
@@ -238,6 +239,7 @@ def _scan_binary(so_path: str, violations: list[str]) -> None:
 # --------------------------------------------------------------------------------------
 # public API
 # --------------------------------------------------------------------------------------
+@logged("anticheat")
 def check(cu_path: str, so_path: Optional[str] = None) -> common.AntiCheatResult:
     """Scan a candidate's source (and optionally its built `.so`) for forbidden
     libraries/symbols/includes.  ok=False with explicit violations[] if any are found."""

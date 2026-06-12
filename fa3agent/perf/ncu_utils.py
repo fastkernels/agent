@@ -82,6 +82,38 @@ def load_action(path):
     return action
 
 
+def load_all_actions(path):
+    """Load a .ncu-rep and return (report, [all actions]) across every range.
+
+    Unlike load_report (which reads only the first action), this enumerates every captured
+    kernel launch -- used by the timing pass to rank a candidate's subkernels by duration.
+    Keep the returned report alive while reading metrics off the actions.
+    """
+    if ncu_report is None:
+        raise RuntimeError("ncu_report module not importable (locate failed)")
+    r = ncu_report.load_report(str(path))
+    try:
+        n_ranges = r.num_ranges()
+    except Exception:
+        n_ranges = 1
+    actions = []
+    for ri in range(n_ranges):
+        try:
+            rng = r.range_by_idx(ri)
+        except Exception:
+            continue
+        try:
+            n_act = rng.num_actions()
+        except Exception:
+            n_act = 1
+        for ai in range(n_act):
+            try:
+                actions.append(rng.action_by_idx(ai))
+            except Exception:
+                continue
+    return r, actions
+
+
 # --- Safe metric access --------------------------------------------------------
 def safe(action, name, default=None):
     """metric value, or `default` if missing/errors. Metric names vary by GPU gen."""

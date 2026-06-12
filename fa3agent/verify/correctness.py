@@ -27,6 +27,7 @@ from .. import config as C
 from .. import common
 from .. import shapes
 from .golden import GoldenCache
+from ..runlog import logged
 
 
 _BASELINE_NS = "_vllm_fa3_C"
@@ -144,6 +145,7 @@ def _check_one(cfg: C.Config, namespace: str, seed: int, gc: GoldenCache) -> com
     return res
 
 
+@logged("correctness")
 def check_correctness(namespace: str, cfgs, seed: int = 0,
                       gpu_id: int = 0) -> list[common.ConfigResult]:
     """Verify a candidate op (registered under ``namespace``) for each config.

@@ -33,6 +33,18 @@ HARD CONTRACT (a candidate that violates any of these is rejected by the driver)
 - Target sm_90a (Hopper H200). Build is toolkit-only (no cutlass include path).
 """
 
+GROUNDING = """\
+GROUND YOUR DESIGN IN THE DOCS, NOT MEMORY. The reference docs are authoritative for THIS GPU
+(sm_90a / Hopper H200); your recollection is not. Before you rely on any PTX instruction, wgmma
+shape, TMA / cp.async.bulk.tensor mode, shared-memory matrix-descriptor or swizzle encoding, or
+occupancy / shared-memory limit, CONFIRM it against the sm_90a docs — do NOT assume a feature,
+shape, or layout is valid here just because it exists on another architecture or you recall it.
+When changing the kernel, FIRST read the relevant sections: docs.retrieve('<keywords>') to find
+where a topic lives, then docs.get_toc('<file>.md') for the exact heading and docs.get_section(
+'<file>.md', '<heading>') to read a dense table (e.g. the wgmma descriptor / swizzle layout) in
+full. If a design choice hinges on a hardware detail, name the doc section it came from.
+"""
+
 TOOLS = """\
 TOOLS YOU SHOULD USE (run from your current working directory, the repo root; they return
 DISTILLED info, not dumps):
@@ -40,8 +52,16 @@ DISTILLED info, not dumps):
     python -c "from fa3agent.knowledge.store import KnowledgeStore as K; s=K(); s.seed(); [print(r) for r in s.query('<your query>')]"
 - Reference-lib primitive hints (pure-PTX models for wgmma/TMA/mbarrier/softmax):
     python -c "from fa3agent.reflib.hints import get_hints; print(get_hints('wgmma bf16'))"
-- NVIDIA docs retrieval:
-    python -c "from fa3agent.docs.retrieve import retrieve; print(retrieve('cp.async.bulk.tensor mbarrier', 3))"
+- NVIDIA docs (reference/{cuda-docs,design-guides,architecture-specs}; incl. the FULL PTX ISA
+  parallel-thread-execution.md, the CUDA C programming guide, ncu/nsys, cutlass, the gemm /
+  kernel-patterns design guides, and the Hopper-H200 spec). THREE ways to read them, all DISTILLED:
+    retrieve('<keywords>', k=5, scope='<file>.md'?)  -> top ranked section snippets (find WHERE a topic lives)
+    get_toc('<file>.md')                             -> that doc's headings + line numbers (see its structure)
+    get_section('<file>.md', '<exact heading>')      -> ONE whole section incl. subsections, UNTRUNCATED
+  Use it for exact PTX syntax/layout (wgmma matrix descriptors & swizzle, mma shapes,
+  cp.async.bulk.tensor/TMA), occupancy / dynamic-SMEM rules, and NCU metric meanings. Typical flow:
+  retrieve to locate -> get_toc to read off the exact heading -> get_section to read a dense table in full.
+    python -c "from fa3agent.docs.retrieve import retrieve, get_toc, get_section; print(get_section('parallel-thread-execution.md', 'Asynchronous Warpgroup Level Matrix Multiply-Accumulate Instructions'))"
 - A correct but slow REFERENCE implementation is at fa3agent/seed_kernel.cu (one warp per
   (query,head), online softmax, fp32 accumulate). Read it to understand the host/registration
   boilerplate and the exact tensor layouts/strides.
@@ -64,6 +84,8 @@ NOT chase performance yet — a correct slow kernel is the required foundation.
 
 {CONTRACT}
 
+{GROUNDING}
+
 {TOOLS}
 
 WRITE your candidate to EXACTLY this path (overwrite if present):
@@ -74,7 +96,7 @@ Then STOP. The driver will build + anti-cheat-scan + verify correctness and repo
 
 def refine_prompt(candidate_path: str, best_path: str, last_eval_summary: str,
                   profile_feedback: str, knowledge_hints: str, focus: str,
-                  supervisor_note: str = "") -> str:
+                  supervisor_note: str = "", doc_hints: str = "") -> str:
     return f"""\
 You are optimizing a Hopper FlashAttention-3 kernel (single self-contained .cu). Continue from
 the current CHAMPION at {best_path} (read it). Make TARGETED edits unless you have a concrete
@@ -88,12 +110,17 @@ LAST EVAL: {last_eval_summary}
 
 PROFILER FEEDBACK (distilled, NCU): {profile_feedback or "(none yet)"}
 
+RELEVANT NVIDIA DOCS (auto-retrieved for the above bottleneck; query docs.retrieve for more, or open the file for a full section):
+{doc_hints or "(none — query docs.retrieve yourself for exact PTX syntax/layout, e.g. with scope='parallel-thread-execution.md')"}
+
 KNOWLEDGE / HINTS (from the typed knowledge base + reference libs): {knowledge_hints or "(query the knowledge base yourself)"}
 
 SUGGESTED FOCUS: {focus}
 {("SUPERVISOR: " + supervisor_note) if supervisor_note else ""}
 
 {CONTRACT}
+
+{GROUNDING}
 
 {TOOLS}
 

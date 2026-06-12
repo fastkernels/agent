@@ -29,6 +29,7 @@ from typing import Optional
 import yaml
 
 from fa3agent import config
+from fa3agent.runlog import logged
 
 # Confidence ordering (higher = more trustworthy) -- used for tie-breaking in query().
 _CONFIDENCE_RANK = {
@@ -184,6 +185,7 @@ class KnowledgeStore:
         return installed
 
     # ---------------------------------------------------------------- add_note
+    @logged("knowledge")
     def add_note(self, ntype: str, title: str, body: str, **frontmatter) -> str:
         """Write a new typed note and return its auto-assigned id.
 
@@ -220,6 +222,7 @@ class KnowledgeStore:
         return note_id
 
     # ------------------------------------------------------------------- query
+    @logged("knowledge")
     def query(self, q: str, ntype: Optional[str] = None, k: int = 5) -> list[dict]:
         """Term-scored search over notes.  Scoring: title hit *10 + tag hit *5 +
         body occurrence (capped at 3) per query term.  Optionally filter by ntype.
@@ -282,6 +285,7 @@ class KnowledgeStore:
         return (lines[0][:_SNIPPET_CHARS] if lines else "")
 
     # --------------------------------------------------------------------- get
+    @logged("knowledge")
     def get(self, note_id: str, follow: bool = False) -> str:
         """Return the full text of a note (frontmatter + body).  If follow=True,
         append the bodies of notes referenced by [[links]] (one hop, deduped)."""
@@ -321,6 +325,7 @@ class KnowledgeStore:
         return None
 
     # -------------------------------------------------------------------- grep
+    @logged("knowledge")
     def grep(self, pattern: str) -> list[str]:
         """Regex search across note bodies.  Returns bounded list of
         'id:line_no: <line>' hits (case-insensitive), capped for context discipline.

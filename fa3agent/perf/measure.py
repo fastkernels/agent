@@ -28,6 +28,7 @@ import torch
 from .. import config as C
 from .. import common
 from .. import shapes
+from ..runlog import logged
 
 
 # --------------------------------------------------------------------------------------
@@ -82,6 +83,7 @@ def _time_kernel(
 # --------------------------------------------------------------------------------------
 # public API (interfaces.py: perf/measure.py)
 # --------------------------------------------------------------------------------------
+@logged("measure")
 def measure(
     namespace: str,
     cfg: C.Config,

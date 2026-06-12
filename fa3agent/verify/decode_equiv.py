@@ -45,6 +45,7 @@ import subprocess
 from typing import Optional, Tuple
 
 from .. import config as C
+from ..runlog import logged
 
 # --------------------------------------------------------------------------------------
 # Defaults / knobs (kept tiny so the gate is bounded).
@@ -62,6 +63,7 @@ _RESULT_PREFIX = "DECODE_EQUIV_RESULT "
 # ======================================================================================
 # Public API
 # ======================================================================================
+@logged("decode_equiv")
 def check_decode_equiv(
     so_path: str,
     namespace: str,

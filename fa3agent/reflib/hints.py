@@ -22,6 +22,8 @@ import shutil
 import subprocess
 from typing import List, Optional, Tuple
 
+from ..runlog import logged
+
 # --------------------------------------------------------------------------- #
 # Paths
 # --------------------------------------------------------------------------- #
@@ -381,6 +383,7 @@ def _read_snippet(abs_path: str, line_no: int) -> List[str]:
 # Public API
 # --------------------------------------------------------------------------- #
 
+@logged("get_hints")
 def get_hints(topic: str, k: int = _DEFAULT_K) -> str:
     """Return up to ``k`` bounded reference-library hints for ``topic``.
 

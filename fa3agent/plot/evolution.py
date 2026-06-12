@@ -28,6 +28,8 @@ import math
 import os
 from typing import Any, Optional
 
+from ..runlog import logged
+
 __all__ = ["update_plot"]
 
 
@@ -333,6 +335,7 @@ def _render_ascii(rows: list[dict], out_txt: str, width: int = 60, height: int =
 # --------------------------------------------------------------------------------------
 # Public entry point
 # --------------------------------------------------------------------------------------
+@logged("plot")
 def update_plot(run_dir: str, candidates_jsonl: str, out_png: Optional[str] = None) -> str:
     """Regenerate the AVO-style evolution plot from ``candidates_jsonl``.
 

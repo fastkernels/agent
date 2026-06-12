@@ -27,6 +27,7 @@ from typing import Optional
 from .. import common
 from .. import config as C
 from .. import llm
+from ..runlog import logged
 
 # Bounds for the distilled BuildResult (context discipline).
 _LOG_HEAD = 4000        # chars kept from the start of the compile log
@@ -218,6 +219,7 @@ def _load_and_get_schema(so_path: str, namespace: str) -> tuple[Optional[str], O
 # --------------------------------------------------------------------------------------
 # public API
 # --------------------------------------------------------------------------------------
+@logged("build")
 def build_candidate(cu_path: str, namespace: str, work_dir: str,
                     extra_defs: Optional[list[str]] = None) -> common.BuildResult:
     """Compile `cu_path` into a torch op library registering namespace `namespace`.

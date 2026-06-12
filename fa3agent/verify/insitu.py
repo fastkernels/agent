@@ -28,6 +28,7 @@ import subprocess
 from typing import Optional
 
 from .. import config as C
+from ..runlog import logged
 
 DEFAULT_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_PROMPT = "The capital of France is"
@@ -36,6 +37,7 @@ CHILD_TIMEOUT_S = 900
 _RESULT_PREFIX = "INSITU_RESULT "
 
 
+@logged("insitu")
 def check_insitu(so_path: str, namespace: str, model: Optional[str] = None,
                  num_steps: int = 4, max_model_len: int = 512) -> dict:
     model = model or DEFAULT_MODEL

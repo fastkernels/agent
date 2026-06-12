@@ -124,6 +124,21 @@ HEADLESS_EFFORT = "xhigh"
 # unbounded-growth resume payload.
 HEADLESS_RESUME_SESSION = False
 
+# Headless-brain watchdogs.  IMPORTANT: this relay BUFFERS long generations -- it delivers only
+# complete messages with no token-level output in between, so a healthy xhigh think legitimately
+# emits ZERO output for many minutes (measured: >7 min of silence mid-generation).  We therefore do
+# NOT kill on output-idleness (that would false-kill slow-but-healthy calls; the prior run had calls
+# of 38-80 min that all completed).  Instead:
+#   * an absolute wall-clock backstop (run_claude `timeout`, default 5400s, just above the observed
+#     ~80-min max) kills a TRUE hang;
+#   * while the relay is silent we WRITE a heartbeat line into brain.log every HEADLESS_HEARTBEAT_S
+#     so a slow generation does not look frozen (relay-independent liveness);
+#   * a CLEAN failure (nonzero exit / error result -- typically a dropped relay connection) is
+#     retried HEADLESS_FAILURE_RETRIES times with a FRESH session (a wall-clock timeout is NOT
+#     retried; the loop falls back to the champion).
+HEADLESS_HEARTBEAT_S = 120
+HEADLESS_FAILURE_RETRIES = 1
+
 
 # Toolkit-only nvcc flags (NO cutlass/cute include path -> anti-cheat by construction).
 NVCC_BASE_FLAGS = [

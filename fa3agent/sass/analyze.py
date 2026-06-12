@@ -26,6 +26,8 @@ import time
 from collections import OrderedDict
 from typing import Optional
 
+from ..runlog import logged
+
 # --------------------------------------------------------------------------------------
 # Instruction taxonomy: FA3-on-Hopper classes that drive a perf verdict.  Each class maps
 # to a list of SASS-opcode PREFIXES (matched against the leading mnemonic token, modifiers
@@ -296,6 +298,7 @@ def _diff(cand_agg: dict, ref_agg: dict, ref_label: str) -> list[str]:
     return lines[:8]
 
 
+@logged("sass_analyze")
 def analyze(so_path: str, namespace: str, baseline_so: Optional[str] = None,
             oracle_cubin: Optional[str] = None) -> dict:
     """Distilled SASS analysis of a built `.so`/cubin.

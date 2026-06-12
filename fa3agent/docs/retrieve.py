@@ -1,15 +1,16 @@
 """Component 2.4 — NVIDIA-docs navigation / retrieval.
 
-retrieve(query, k=5, scope=None) -> str
+Three ways to read the local reference docs (reference/{cuda-docs,design-guides,architecture-specs}):
+  retrieve(query, k=5, scope=None) -> str   # rank WHERE a topic lives (BM25-lite section snippets)
+  get_toc(doc, max_depth=0)        -> str   # a doc's headings + line numbers (its structure)
+  get_section(doc, heading)        -> str   # ONE section in FULL, incl. subsections (no clipping)
 
-Keyword/section retrieval over the local reference docs:
-  reference/cuda-docs/*.md, reference/design-guides/*.md, reference/architecture-specs/*.md
+Typical flow: retrieve() to locate the topic -> get_toc() to read off the exact heading ->
+get_section() to pull a dense table (e.g. a wgmma descriptor/swizzle layout) whole, where a
+ranked snippet would be truncated.
 
-Docs are split into sections by markdown headings; sections are scored by
-query-term overlap (BM25-lite over case-insensitive tokens) and the top-k are
-returned as bounded snippets, each prefixed with 'source: <file> #<heading>'.
-
-Output is bounded (each snippet <= ~40 lines; total <= ~6KB).  Stdlib only.
+retrieve() output is bounded (each snippet <= ~100 lines; total <= ~14KB); get_section() returns
+a whole section up to a generous safety ceiling.  Stdlib only.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ import math
 import os
 import re
 from functools import lru_cache
+
+from ..runlog import logged
 
 try:
     from fa3agent import config as _config
@@ -35,9 +38,17 @@ except Exception:  # pragma: no cover - fallback if config import path changes
 # Bounds (the whole point of this component: distilled, bounded output).
 # ---------------------------------------------------------------------------
 SCOPES = ("cuda-docs", "design-guides", "architecture-specs")
-_MAX_SNIPPET_LINES = 40
-_MAX_TOTAL_BYTES = 6 * 1024  # ~6 KB hard cap on the returned string
-_MAX_SNIPPET_BYTES = 1800  # per-snippet body byte cap (before the header)
+# Caps sized so a full dense reference table (the wgmma SMEM descriptor / swizzle sections run
+# ~30-82 lines / 1.5-4KB) comes back WHOLE instead of clipped mid-table -- truncation here was
+# making the brain re-query the same thing 4-5x.  Genuinely huge sections (e.g. the 254-line
+# matrix-layout section) still clip; the brain reads the file directly for those.
+_MAX_SNIPPET_LINES = 100
+_MAX_TOTAL_BYTES = 14 * 1024  # ~14 KB hard cap on the returned string
+_MAX_SNIPPET_BYTES = 4500  # per-snippet body byte cap (before the header)
+# get_section returns a WHOLE section (incl. subsections) untruncated; this is only a safety
+# ceiling so a giant top-level chapter can't dump hundreds of KB. The dense tables we care about
+# are well under it; if a section trips it, the caller drills into a subsection via get_toc.
+_MAX_SECTION_BYTES = 40 * 1024
 
 # BM25-lite parameters.
 _BM25_K1 = 1.5
@@ -237,6 +248,7 @@ def _render_snippet(section: _Section) -> str:
     return header + "\n" + body
 
 
+@logged("retrieve")
 def retrieve(query: str, k: int = 5, scope=None) -> str:
     """Return top-k bounded doc snippets relevant to `query`.
 
@@ -289,3 +301,137 @@ def retrieve(query: str, k: int = 5, scope=None) -> str:
         out_parts.append(snippet)
         total += len(addition.encode("utf-8"))
     return (sep.join(out_parts)).strip()
+
+
+# ---------------------------------------------------------------------------
+# Structured navigation (companions to retrieve): outline a doc, then pull one
+# whole section by heading.  retrieve() ranks WHERE a topic lives; get_toc shows
+# a doc's exact headings; get_section reads a chosen section in full (incl. its
+# subsections) so a dense table is never clipped the way a ranked snippet can be.
+# ---------------------------------------------------------------------------
+def _read_doc_lines(path: str) -> list[str]:
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        return fh.read().splitlines()
+
+
+def _resolve_doc(name) -> "str | None":
+    """Map a doc filename (e.g. 'parallel-thread-execution.md', '.md' optional) to its path."""
+    if not name:
+        return None
+    files = _scope_files(os.path.basename(str(name)))
+    return files[0] if files else None
+
+
+def _no_doc_msg(name) -> str:
+    avail = sorted({os.path.basename(p) for p in _scope_files(None)})
+    if not avail:
+        return f"(no reference docs found under {_REFERENCE_DIR})"
+    return f"(no reference doc {name!r}; available: {', '.join(avail)})"
+
+
+def _norm_heading(text: str) -> str:
+    """Normalize a heading for matching: drop section numbers/link sugar, lowercase, collapse ws."""
+    return " ".join(_clean_heading(text).lower().split())
+
+
+def _scan_headings(raw: list[str]) -> list[tuple[int, int, str]]:
+    """Fence-aware heading scan -> [(0-based line index, level, cleaned title)] in document order."""
+    out: list[tuple[int, int, str]] = []
+    in_fence = False
+    for i, line in enumerate(raw):
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        m = _HEADING_RE.match(line)
+        if m:
+            out.append((i, len(m.group(1)), _clean_heading(m.group(2))))
+    return out
+
+
+@logged("get_toc")
+def get_toc(doc: str, max_depth: int = 0) -> str:
+    """Outline a reference doc: every heading with its nesting level and line number.
+
+    Call this to find the exact heading text to pass to get_section() -- cheaper and more
+    precise than streaming a whole large file.  `doc` is a filename (e.g.
+    'parallel-thread-execution.md').  `max_depth` (0 = all) caps how deep the outline goes
+    (e.g. 2 = top two heading levels).
+    """
+    path = _resolve_doc(doc)
+    if not path:
+        return _no_doc_msg(doc)
+    try:
+        raw = _read_doc_lines(path)
+    except OSError as e:
+        return f"(could not read {os.path.basename(path)}: {e})"
+    try:
+        max_depth = int(max_depth)
+    except (TypeError, ValueError):
+        max_depth = 0
+
+    fname = os.path.basename(path)
+    rows = [
+        f"  L{idx + 1:<6}{'  ' * (level - 1)}{title}"
+        for idx, level, title in _scan_headings(raw)
+        if not max_depth or level <= max_depth
+    ]
+    if not rows:
+        return f"outline: {fname}\n  (no headings)"
+    return (f"outline: {fname} ({len(rows)} headings)\n"
+            + "\n".join(rows)
+            + f"\n\nRead one in full with: get_section({fname!r}, '<exact heading above>')")
+
+
+@logged("get_section")
+def get_section(doc: str, heading: str) -> str:
+    """Return ONE whole section of a reference doc: the chosen heading plus everything under it
+    (including nested subsections) up to the next heading at the same or a shallower level.
+
+    Use this to read a dense table (e.g. a wgmma shared-memory descriptor / swizzle layout) in
+    FULL, where a ranked retrieve() snippet would be truncated.  `doc` is a filename; `heading`
+    is the heading text as shown by get_toc()/retrieve() (a leading section number is optional).
+    """
+    path = _resolve_doc(doc)
+    if not path:
+        return _no_doc_msg(doc)
+    if not heading or not str(heading).strip():
+        return f"(no heading given; call get_toc({os.path.basename(path)!r}) to list headings)"
+    try:
+        raw = _read_doc_lines(path)
+    except OSError as e:
+        return f"(could not read {os.path.basename(path)}: {e})"
+
+    fname = os.path.basename(path)
+    headings = _scan_headings(raw)
+    want = _norm_heading(heading)
+
+    target = next((j for j, (_, _, t) in enumerate(headings) if _norm_heading(t) == want), None)
+    if target is None:
+        # No exact match: accept a unique partial match, else point back to get_toc.
+        partial = [j for j, (_, _, t) in enumerate(headings) if want and want in _norm_heading(t)]
+        if len(partial) == 1:
+            target = partial[0]
+        else:
+            near = ", ".join(headings[j][2] for j in partial[:8])
+            hint = f" closest: {near};" if near else ""
+            return (f"(no section {heading!r} in {fname};{hint} "
+                    f"call get_toc({fname!r}) for exact headings)")
+
+    start_idx, level, title = headings[target]
+    end_idx = len(raw)
+    for nidx, nlevel, _t in headings[target + 1:]:
+        if nlevel <= level:               # next same-or-shallower heading ends this section
+            end_idx = nidx
+            break
+
+    text = "\n".join(raw[start_idx:end_idx]).rstrip()
+    header = f"source: {fname} #{title} (line {start_idx + 1})"
+    enc = text.encode("utf-8")
+    if len(enc) > _MAX_SECTION_BYTES:
+        text = enc[:_MAX_SECTION_BYTES].decode("utf-8", errors="ignore").rstrip()
+        text += (f"\n... [section exceeds {_MAX_SECTION_BYTES // 1024}KB and was truncated; "
+                 f"call get_toc({fname!r}) and fetch a narrower subsection]")
+    return header + "\n" + text

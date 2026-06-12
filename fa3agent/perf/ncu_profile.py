@@ -3,8 +3,10 @@
 `profile(so_path, namespace, cfg, gpu_id, run_dir) -> common.ProfileFeedback`
 
 Pipeline:
-  1. Discover the kernel name from the .so via `cuobjdump --dump-sass` (FA3 kernels are
-     templated; we never hardcode a name) and derive a safe `-k` regex.
+  1. TIMING PASS: a cheap one-metric ncu run captures the launches and ranks the candidate's
+     subkernels by duration, so we deep-profile (and `-k`-target) the DOMINANT kernel -- a split-KV
+     candidate runs a heavy partial kernel + a tiny combine kernel -- and report the per-kernel time
+     split.  Falls back to a name-based `-k` regex from `cuobjdump --dump-sass` if timing is unavailable.
   2. Write a tiny standalone torch driver that load_library(so), warms once, and does ONE
      `shapes.call_fwd` launch for `cfg`.
   3. Run that driver under ncu as a SUBPROCESS (CUDA_VISIBLE_DEVICES=gpu_id), capturing one
@@ -32,11 +34,18 @@ from typing import Optional
 from .. import config as C
 from .. import common
 from . import ncu_utils as U
+from ..runlog import logged
 
 # ncu collection wall-clock budgets (seconds).  --set full = ~38 replay passes on the seed.
 _FULL_TIMEOUT = 480
 _SUBSET_TIMEOUT = 240
 _NCU_BIN = os.environ.get("NCU_BIN", "ncu")
+
+# Phase-A timing pass: capture this many launches with one cheap metric (covers the warmup +
+# profiled iterations of a few-kernel forward) so we can rank the candidate's subkernels by
+# duration and deep-profile the DOMINANT one (not, e.g., a tiny split-KV combine kernel).
+_TIMING_LAUNCHES = 16
+_TIMING_TIMEOUT = 150
 
 # How many words each terse field is allowed (CUDAForge contract).
 _BOTTLENECK_W = 30
@@ -70,6 +79,17 @@ _ATEN_PAT = re.compile(
     r"vectorized|CatArray|reduce_kernel|fill_|index_elementwise|c10",
     re.I)
 
+# Tokens by which a candidate's own attention kernels self-identify (seed: attn_kernel; split-KV:
+# attn_partial_kernel / attn_combine_kernel).  Used to pick candidate kernels out of a launch trace.
+_ATTN_PAT = re.compile(r"flash|attn|fwd|mha|fmha|attention", re.I)
+# Helper/library kernels to drop from the timing trace.  Broader than _ATEN_PAT, which targets
+# cuobjdump's MANGLED `Function:` names; these match the DEMANGLED names ncu_report returns.
+_HELPER_PAT = re.compile(
+    r"at::native|\bat::|_GLOBAL__N__|elementwise|Philox|RangeFactories|thrust::|cub::|"
+    r"vectorized_elementwise|CatArray|reduce_kernel|fill_|index_elementwise|c10::|"
+    r"DeviceReduce|distribution_|direct_copy",
+    re.I)
+
 
 def discover_kernel_regex(so_path: str, dtype: Optional[str] = None) -> Optional[str]:
     """Return a mangled-name regex selecting the candidate's OWN attention kernel.
@@ -87,8 +107,7 @@ def discover_kernel_regex(so_path: str, dtype: Optional[str] = None) -> Optional
     if not names:
         return None
     own = [n for n in names if not _ATEN_PAT.search(n)] or names   # drop torch/aten helpers
-    pat = re.compile(r"flash|attn|fwd|mha|fmha|attention", re.I)
-    cands = [n for n in own if pat.search(n)] or own
+    cands = [n for n in own if _ATTN_PAT.search(n)] or own
     # Return a BROAD alternation matching ANY of the candidate's attention-kernel variants -- a
     # candidate may ship several (e.g. scalar attn_kernel AND wgmma attn_mma_kernel); a single
     # narrow token ('attn_kernel') would miss 'attn_mma_kernel' and ncu would match a kernel that
@@ -98,6 +117,31 @@ def discover_kernel_regex(so_path: str, dtype: Optional[str] = None) -> Optional
     if present:
         return "regex:" + "|".join(present)
     return "regex:" + re.escape(cands[0])
+
+
+def _short_kname(name: str) -> str:
+    """Trim template args / parameter lists from a kernel name for compact display."""
+    return (name or "?").split("<")[0].split("(")[0].strip() or (name or "?")
+
+
+def _kregex_for(dominant: str, names: list[str]) -> Optional[str]:
+    """Build a `-k` regex selecting ONLY the dominant kernel among `names` (the launched set).
+
+    Picks an identifier token in the dominant kernel's name that no other launched kernel shares
+    (e.g. 'partial' vs an 'attn_combine_kernel'); that token also occurs in the mangled symbol, so
+    it works with --kernel-name-base mangled.  Prefers an attention-identity token so the filter
+    stays off torch helper kernels; falls back to the longest unique (then longest) identifier.
+    """
+    toks = list(dict.fromkeys(re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", dominant or "")))
+    if not toks:
+        return None
+    others = [n for n in names if n != dominant]
+    uniq = [t for t in toks if not any(t in o for o in others)]
+    attn_uniq = [t for t in uniq if _ATTN_PAT.search(t)]
+    pick = (max(attn_uniq, key=len) if attn_uniq
+            else max(uniq, key=len) if uniq
+            else max(toks, key=len))
+    return "regex:" + re.escape(pick)
 
 
 # --- 2. driver script ----------------------------------------------------------
@@ -192,6 +236,50 @@ def _run_ncu(driver: str, rep_base: str, kregex: Optional[str], env: dict,
         return 124, f"TIMEOUT after {timeout}s\n" + so + se
     except (FileNotFoundError, OSError) as e:
         return 127, f"ncu binary not launchable ({_NCU_BIN}): {e}"
+
+
+def _time_kernels(driver: str, rep_base: str, env: dict) -> list[tuple[str, float]]:
+    """Phase A: a cheap single-metric ncu pass capturing the first _TIMING_LAUNCHES launches, used
+    to rank the candidate's OWN kernels by duration (dominant first).
+
+    Returns [(kernel_name, time_ns)] or [] if profiling is unavailable here (caller then falls back
+    to the name-only `-k` heuristic).  Helper/library kernels are dropped; if any kernels carry an
+    attention-identity token we keep only those, else all non-helper kernels.
+    """
+    rep = rep_base + ".ncu-rep"
+    cmd = [_NCU_BIN, "-f", "-o", rep_base, "--target-processes", "all", "--replay-mode", "kernel",
+           "-c", str(_TIMING_LAUNCHES), "--metrics", "gpu__time_duration.sum", "python", driver]
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, timeout=_TIMING_TIMEOUT, env=env)
+    except Exception:  # noqa - timing pass is best-effort; caller degrades gracefully
+        return []
+    if not os.path.exists(rep):
+        return []
+    try:
+        _report, actions = U.load_all_actions(rep)
+    except Exception:
+        return []
+    times: dict[str, float] = {}
+    for a in actions:
+        try:
+            name = a.name()
+        except Exception:
+            continue
+        if not name or _HELPER_PAT.search(name):
+            continue
+        d = U.metric_or_none(a, "gpu__time_duration.sum")
+        if d is None:
+            continue
+        try:
+            times[name] = float(d)   # last (most-warmed) occurrence per kernel wins
+        except (TypeError, ValueError):
+            continue
+    if not times:
+        return []
+    # Prefer the candidate's attention kernels; if none self-identify, keep all non-helper kernels.
+    attn = {n: t for n, t in times.items() if _ATTN_PAT.search(n)}
+    chosen = attn or times
+    return sorted(chosen.items(), key=lambda kv: -kv[1])
 
 
 def _classify_perm_error(text: str) -> Optional[str]:
@@ -330,6 +418,7 @@ def _ranked(action, ev: list[str]) -> list[str]:
 
 
 # --- top-level entry -----------------------------------------------------------
+@logged("ncu_profile")
 def profile(so_path: str, namespace: str, cfg, gpu_id: int,
             run_dir: str) -> common.ProfileFeedback:
     os.makedirs(run_dir, exist_ok=True)
@@ -341,11 +430,21 @@ def profile(so_path: str, namespace: str, cfg, gpu_id: int,
         return fb
 
     driver = _write_driver(run_dir, so_path, namespace, cfg)
-    kregex = discover_kernel_regex(so_path, getattr(cfg, "dtype", None))
     rep_base = os.path.join(run_dir, "rep")
     rep_path = rep_base + ".ncu-rep"
     env = _ncu_env(gpu_id, run_dir)
 
+    # Phase A: cheap timing pass -> rank the candidate's subkernels by duration and target the
+    # DOMINANT one.  A split-KV candidate launches a heavy partial-attention kernel + a tiny
+    # combine kernel; the old broad `-k` regex matched both and `-c 1` often captured the combine.
+    ranked = _time_kernels(driver, os.path.join(run_dir, "rep_timing"), env)
+    dtype = getattr(cfg, "dtype", None)
+    if ranked:
+        kregex = _kregex_for(ranked[0][0], [n for n, _ in ranked]) or discover_kernel_regex(so_path, dtype)
+    else:
+        kregex = discover_kernel_regex(so_path, dtype)
+
+    # Phase B: deep-profile the targeted (dominant) kernel.
     rc, log = _run_ncu(driver, rep_base, kregex, env, "full", _FULL_TIMEOUT)
     used = "full"
     if (rc != 0 or not os.path.exists(rep_path)) and "ERR_NVGPUCTRPERM" not in log:
@@ -390,10 +489,24 @@ def profile(so_path: str, namespace: str, cfg, gpu_id: int,
     if dur is not None:
         key_metrics["gpu__time_duration.sum_ns"] = dur
 
+    # Per-subkernel time split from the timing pass: tells the brain WHERE time goes across a
+    # multi-kernel forward and which kernel these metrics describe.
+    kernels_line = None
+    if ranked:
+        tot = sum(d for _, d in ranked) or 1.0
+        key_metrics["_kernels"] = [
+            {"name": _short_kname(n), "time_ns": round(d, 1), "pct": round(100.0 * d / tot, 1)}
+            for n, d in ranked
+        ]
+        if len(ranked) > 1:
+            summ = " / ".join(f"{_short_kname(n)} {100.0 * d / tot:.0f}%" for n, d in ranked[:4])
+            kernels_line = f"kernels by time: {summ} (profiled: {_short_kname(kname)})"
+
     fb.bottleneck = _clip_words(bn, _BOTTLENECK_W)
     fb.optimization = _clip_words(opt, _OPT_W)
     fb.plan = _clip_words(plan, _PLAN_W)
-    fb.ranked = _ranked(action, ev)
+    base_ranked = _ranked(action, ev)
+    fb.ranked = ([kernels_line] + base_ranked)[:5] if kernels_line else base_ranked
     fb.key_metrics = key_metrics
     fb.report_path = rep_path
     if perm:  # collected but with warnings

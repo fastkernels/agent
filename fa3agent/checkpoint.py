@@ -10,7 +10,7 @@ Layout:
     meta.json                 run config (config set, model, max_steps, ...)
     candidates.jsonl          one StepRecord per step (the lineage)
     candidates/stepNNN.cu     candidate source per step
-    builds/stepNNN/           per-step build dir (.so, logs)
+    builds/stepNNN/           per-step dir: .so + brain.log + prompt.log + per-tool <tool>.log call logs
     reports/                  ncu/sass reports
     knowledge/                typed knowledge store (notes)
     plots/evolution.png       AVO-style evolution plot

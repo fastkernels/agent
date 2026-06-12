@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import json
 import shutil
 import subprocess
@@ -22,7 +23,7 @@ from dataclasses import asdict
 from typing import Optional
 
 from . import config as C
-from . import common, checkpoint, llm, prompts
+from . import common, checkpoint, llm, prompts, runlog
 from .common import BuildResult, AntiCheatResult, ConfigResult, EvalResult, StepRecord
 from .gpu_pool import GPUPool
 
@@ -32,6 +33,22 @@ def _geomean(xs: list[float]) -> float:
     if not xs:
         return 0.0
     return math.exp(sum(math.log(x) for x in xs) / len(xs))
+
+
+def _doc_query(focus: str, bottleneck: str) -> str:
+    """Build a docs.retrieve query from the step's focus lever + the bottleneck.
+
+    The raw bottleneck string carries metric noise (e.g. '78.3%', '1.05e+06', 'SM SOL 0.2%')
+    that pollutes the lexical scorer, so numbers/symbols are stripped; combining the focus
+    (the technique to apply) with the cleaned symptom keywords retrieves both the how-to and
+    the diagnostic docs (verified: this beats querying the raw bottleneck verbatim).
+    """
+    bt = bottleneck or ""
+    if bt.startswith("("):          # status placeholder like "(profile timed out)" -> ignore
+        bt = ""
+    bt = re.sub(r"[0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?\s*%?", " ", bt)  # drop numeric/metric noise
+    bt = re.sub(r"[<>=/:+,.]", " ", bt)
+    return (focus + " " + bt).strip()
 
 
 class Orchestrator:
@@ -85,6 +102,7 @@ class Orchestrator:
         grab("sass_analyze", "fa3agent.sass.analyze", "analyze")
         grab("update_plot", "fa3agent.plot.evolution", "update_plot")
         grab("get_hints", "fa3agent.reflib.hints", "get_hints")
+        grab("retrieve", "fa3agent.docs.retrieve", "retrieve")
         try:
             from fa3agent.knowledge.store import KnowledgeStore
             comp["KnowledgeStore"] = KnowledgeStore
@@ -94,6 +112,7 @@ class Orchestrator:
         return comp
 
     def _log(self, msg: str):
+        # The general run narrative goes to stdout, which the launcher redirects to run.log.
         print(f"[fa3agent {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
     def _ns(self, step: int) -> str:
@@ -129,18 +148,29 @@ class Orchestrator:
         if best is None:
             prompt = prompts.bootstrap_prompt(cand_path, [c.name for c in self.cfgs])
         else:
+            bottleneck = (prev.get("profile", {}) or {}).get("bottleneck", "") if prev else ""
+            focus = prompts.FOCUS_LEVERS[step % len(prompts.FOCUS_LEVERS)]
             kh = ""
             try:
                 if self.comp.get("get_hints"):
                     kh = self.comp["get_hints"]("wgmma bf16") or ""
             except Exception:
                 pass
-            focus = prompts.FOCUS_LEVERS[step % len(prompts.FOCUS_LEVERS)]
+            # Proactively retrieve an NVIDIA-docs snippet keyed to this step's FOCUS technique +
+            # bottleneck symptom and inject it (so the docs are surfaced even on steps where the
+            # brain wouldn't think to query; it can still call docs.retrieve for more itself).
+            dh = ""
+            try:
+                if self.comp.get("retrieve"):
+                    dh = self.comp["retrieve"](_doc_query(focus, bottleneck), k=2) or ""
+            except Exception:
+                pass
             prompt = prompts.refine_prompt(
                 cand_path, self.paths["best"],
                 last_eval_summary=(prev.get("eval", {}) or {}).get("__summary__", str(prev.get("status"))) if prev else "n/a",
-                profile_feedback=(prev.get("profile", {}) or {}).get("bottleneck", "") if prev else "",
+                profile_feedback=bottleneck,
                 knowledge_hints=kh[:1500],
+                doc_hints=dh[:3000],
                 focus=focus,
                 supervisor_note=self._supervisor_note)
 
@@ -151,7 +181,19 @@ class Orchestrator:
         t0 = time.time()
         res = llm.run_claude(prompt, cwd=C.REPO_ROOT, model=self.model, effort=self.effort,
                              session_id=session_id, stream_log=brain_log)
-        self._log(f"[gen] brain returned in {time.time()-t0:.0f}s (ok={res.ok}); "
+        dt = time.time() - t0
+        # Per-step audit of the brain's I/O: the FULL prompt/context it was given + what it
+        # returned, written to builds/stepNNN/prompt.log (the live token stream stays in the
+        # sibling brain.log transcript).
+        runlog.record("prompt", label=f"brain[{cid}]",
+                      note=f"{mode}; transcript -> {brain_log}",
+                      inputs={"model": self.model, "effort": self.effort,
+                              "session_id": session_id, "cwd": C.REPO_ROOT,
+                              "candidate_path": cand_path, "prompt": prompt},
+                      output={"ok": res.ok, "session_id": res.session_id, "error": res.error,
+                              "candidate_written": os.path.exists(cand_path), "result_text": res.text},
+                      duration_s=dt, max_chars=1_000_000)
+        self._log(f"[gen] brain returned in {dt:.0f}s (ok={res.ok}); "
                   f"candidate {'written' if os.path.exists(cand_path) else 'MISSING'}")
         # If the brain didn't produce a file, bootstrap from the seed (guarantees a candidate).
         if not os.path.exists(cand_path):
@@ -227,6 +269,12 @@ class Orchestrator:
     def _step(self, step: int, prev: Optional[dict], best: Optional[dict]) -> StepRecord:
         cid = f"step{step:03d}"
         ns = self._ns(step)
+        # Per-tool call logs for this step land in builds/stepNNN/<tool>.log (one dir per step,
+        # never a cross-step file).  Exported via env so the brain's own `python -c` tool calls
+        # and the measure/profile/verify subprocesses (which inherit this environment) write to
+        # the SAME per-step dir.  The general narrative stays on stdout -> run.log.
+        runlog.set_dir(checkpoint.build_dir(self.run_id, cid))
+        runlog.set_step(step)
         self._log(f"=== STEP {step} ({cid}, ns={ns}) ===")
         rec = StepRecord(step=step, cid=cid, parent=(best.get("cid") if best else None), status="generated")
 
