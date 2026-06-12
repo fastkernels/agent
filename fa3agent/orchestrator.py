@@ -132,6 +132,7 @@ class Orchestrator:
         grab("check_correctness", "fa3agent.verify.correctness", "check_correctness")
         grab("check_decode_equiv", "fa3agent.verify.decode_equiv", "check_decode_equiv")
         grab("check_insitu", "fa3agent.verify.insitu", "check_insitu")
+        grab("check_cuda_graph", "fa3agent.verify.cudagraph", "check_cuda_graph")
         grab("run_sanitizer", "fa3agent.verify.sanitizer", "run_sanitizer")
         grab("measure", "fa3agent.perf.measure", "measure")
         # NCU profiling runs OUT-OF-PROCESS (see _profile_subprocess): ncu_report + torch
@@ -451,6 +452,30 @@ class Orchestrator:
                 self._log(f"[error] step {step} crashed: {e!r}\n{traceback.format_exc()[:1000]}")
                 rec = StepRecord(step=step, cid=f"step{step:03d}", parent=None, status="error",
                                  knowledge_note=str(e)[:300])
+
+            # ---- CUDA-graph compatibility gate (binary) ----
+            # vLLM captures the FA3 op in a FULL CUDA graph for steady-state decode, so a candidate
+            # that can't be captured -- or diverges on replay -- is not a valid drop-in even when it
+            # is correct + fast EAGERLY.  Every other gate runs eager and misses this.  Run it for a
+            # correct promotion candidate; a real (non-skip) failure blocks promotion and is fed back.
+            if rec.status == "correct" and rec.eval and self.comp.get("check_cuda_graph"):
+                mr = rec.eval.get("min_ratio", 0.0)
+                if best is None or mr >= self._best_min_ratio - C.PERF_NOISE_BAND:
+                    so = (rec.build or {}).get("so_path"); ns = self._ns(rec.step)
+                    if so:
+                        gpu = self.pool.gpu_ids[0]
+                        with self.pool.exclusive(gpu):
+                            cg = self.comp["check_cuda_graph"](so, ns)
+                        rec.eval["cudagraph"] = cg
+                        self._log(f"[cudagraph] {cg.get('note', '')}")
+                        if cg.get("ok") is False and not cg.get("skip"):
+                            rec.status = "cudagraph_fail"   # not graph-capturable -> not a valid drop-in
+                            self._distill(rec,
+                                "CUDA-graph INCOMPATIBLE: " + str(cg.get("note", "")) +
+                                " The kernel MUST be cuda-graph-capturable (vLLM captures decode in a full "
+                                "graph): no host sync / host allocation / device->host readback or host-side "
+                                "launch decisions inside fwd; derive the grid from shapes + the precomputed "
+                                "scheduler_metadata, not from reading tensor values on the host.", ntype="ks")
 
             # ---- faithful vLLM gates, COST-TIERED (only for a correct promotion candidate) ----
             # Tier 2: in-situ A/B on LIVE vLLM tensors (cheap, faithful -- catches live-layout

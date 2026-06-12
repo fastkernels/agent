@@ -37,6 +37,12 @@ verify/decode_equiv.py  (promotion gate)
      Monkeypatch vLLM flash_attn_varlen_func -> torch.ops.<ns>.fwd, tiny-model greedy
      decode num_tokens (temp=0, enforce_eager), compare token ids to baseline. Subprocess.
 
+verify/cudagraph.py     (compat gate — binary)
+  check_cuda_graph(so_path, namespace, cfg_name=None, gpu_id=0) -> dict
+     Capture+replay the candidate op in a CUDA graph (baseline captured first as a control);
+     verify replay matches eager. {ok, captured, replay_match, skip, max_diff, note}. Subprocess.
+     A non-skip ok=False means the kernel isn't graph-capturable -> not a valid vLLM drop-in.
+
 verify/sanitizer.py     (2.2 — on-demand only)
   run_sanitizer(so_path, namespace, cfg, tool='memcheck') -> dict
      tool in {memcheck,racecheck,initcheck,synccheck}. Minimal driver under compute-sanitizer
