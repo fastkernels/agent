@@ -21,6 +21,37 @@ def _latest_run() -> str | None:
     return os.path.basename(runs[-1]) if runs else None
 
 
+class _Tee:
+    """Fan one text stream out to several (e.g. the real stdout + the run's run.log).
+
+    Line-buffered writes with a flush after every write so ``run.log`` updates live
+    as the loop prints progress -- ``tail -f .../run_*/run.log`` works regardless of
+    how the process was launched (foreground, nohup, or a redirected stdout).
+    """
+
+    def __init__(self, *streams):
+        self._streams = [s for s in streams if s is not None]
+
+    def write(self, s):
+        for st in self._streams:
+            try:
+                st.write(s)
+                st.flush()
+            except (OSError, ValueError):
+                pass
+        return len(s)
+
+    def flush(self):
+        for st in self._streams:
+            try:
+                st.flush()
+            except (OSError, ValueError):
+                pass
+
+    def isatty(self):
+        return False
+
+
 def cmd_run(a):
     from .orchestrator import Orchestrator
     run_id = a.run_id
@@ -30,16 +61,41 @@ def cmd_run(a):
             print("no run to resume"); return 2
     if not run_id:
         run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}"
-    print(f"run_id={run_id}  configs={a.configs}  max_steps={a.max_steps}  model={a.model}  "
-          f"effort={a.effort}  resume={a.resume}")
-    orch = Orchestrator(run_id, config_set=a.configs, max_steps=a.max_steps, model=a.model,
-                        effort=a.effort,
-                        decode_tokens=a.decode_tokens, do_decode_equiv=not a.no_decode_equiv,
-                        profile_enabled=not a.no_profile)
-    result = orch.run()
-    print("RESULT:", result)
-    print("checkpoint:", os.path.join(C.CHECKPOINT_ROOT, run_id))
-    return 0
+
+    # Tee the whole run narrative into <run_dir>/run.log so the live progress log lives
+    # inside the run folder (what `tail -f .../run_*/run.log` expects), in addition to
+    # whatever the launcher does with stdout.  Best-effort: never let logging-setup break
+    # the run.
+    run_dir = os.path.join(C.CHECKPOINT_ROOT, run_id)
+    log_fh = None
+    saved = None
+    try:
+        os.makedirs(run_dir, exist_ok=True)
+        log_fh = open(os.path.join(run_dir, "run.log"), "a", buffering=1,
+                      encoding="utf-8", errors="replace")
+        saved = (sys.stdout, sys.stderr)
+        sys.stdout = _Tee(saved[0], log_fh)
+        sys.stderr = _Tee(saved[1], log_fh)
+    except OSError as e:
+        print(f"[warn] could not open {run_dir}/run.log ({e}); logging to stdout only")
+        log_fh = None
+
+    try:
+        print(f"run_id={run_id}  configs={a.configs}  max_steps={a.max_steps}  model={a.model}  "
+              f"effort={a.effort}  resume={a.resume}")
+        orch = Orchestrator(run_id, config_set=a.configs, max_steps=a.max_steps, model=a.model,
+                            effort=a.effort,
+                            decode_tokens=a.decode_tokens, do_decode_equiv=not a.no_decode_equiv,
+                            profile_enabled=not a.no_profile)
+        result = orch.run()
+        print("RESULT:", result)
+        print("checkpoint:", os.path.join(C.CHECKPOINT_ROOT, run_id))
+        return 0
+    finally:
+        if saved is not None:
+            sys.stdout, sys.stderr = saved
+        if log_fh is not None:
+            log_fh.close()
 
 
 def cmd_list(a):

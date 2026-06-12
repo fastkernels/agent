@@ -151,7 +151,8 @@ class Orchestrator:
         return comp
 
     def _log(self, msg: str):
-        # The general run narrative goes to stdout, which the launcher redirects to run.log.
+        # The general run narrative goes to stdout, which cmd_run tees into
+        # <run_dir>/run.log (plus whatever the launcher does with stdout).
         print(f"[fa3agent {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
     def _ns(self, step: int) -> str:
