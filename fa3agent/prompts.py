@@ -1,7 +1,7 @@
 """Prompt builders for the Claude Code headless brain.
 
-The brain runs as `claude -p` in cwd=/data-fast/agent with full tools, so it can read
-reference/, .research/, the seed, and CALL the agent's components (knowledge.query,
+The brain runs as `claude -p` in cwd=<repo root> (config.REPO_ROOT) with full tools, so it
+can read reference/, .research/, the seed, and CALL the agent's components (knowledge.query,
 docs.retrieve, reflib.hints, sass tools) itself.  We hand it DISTILLED feedback (not dumps)
 and tell it to WRITE the candidate .cu to an exact path; the DRIVER runs the eval.
 """
@@ -34,7 +34,8 @@ HARD CONTRACT (a candidate that violates any of these is rejected by the driver)
 """
 
 TOOLS = """\
-TOOLS YOU SHOULD USE (run from /data-fast/agent; they return DISTILLED info, not dumps):
+TOOLS YOU SHOULD USE (run from your current working directory, the repo root; they return
+DISTILLED info, not dumps):
 - Knowledge base (typed: ks=kernel, pf=profiling, alg=algorithmic):
     python -c "from fa3agent.knowledge.store import KnowledgeStore as K; s=K(); s.seed(); [print(r) for r in s.query('<your query>')]"
 - Reference-lib primitive hints (pure-PTX models for wgmma/TMA/mbarrier/softmax):

@@ -53,14 +53,15 @@ def check_insitu(so_path: str, namespace: str, model: Optional[str] = None,
 
 def _run_child(payload: dict) -> Optional[dict]:
     env = dict(os.environ)
-    env.setdefault("HF_HOME", "/data-fast/huggingface")
+    if C.HF_HOME:
+        env.setdefault("HF_HOME", C.HF_HOME)
     env.setdefault("VLLM_ATTENTION_BACKEND", "FLASH_ATTN")
     env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"   # in-process EngineCore so the patch is seen
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "fa3agent.verify.insitu", json.dumps(payload)],
-            cwd="/data-fast/agent", env=env, capture_output=True, text=True, timeout=CHILD_TIMEOUT_S)
+            cwd=C.REPO_ROOT, env=env, capture_output=True, text=True, timeout=CHILD_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         return {"engine_failed": True, "note": f"insitu child timed out after {CHILD_TIMEOUT_S}s"}
     except Exception as e:  # noqa

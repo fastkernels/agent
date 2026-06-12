@@ -11,6 +11,7 @@ Run from /data-fast/agent (so `import fa3agent...` resolves):
 from __future__ import annotations
 
 import math
+import os
 import sys
 
 import torch
@@ -18,7 +19,7 @@ import torch
 from fa3agent import config as C
 from fa3agent.perf import measure
 
-SEED_SO = "/code/users/goliaro/cuda-agent-checkpoints/_seedtest/build/_distill_fa3_C.so"
+SEED_SO = os.path.join(C.CHECKPOINT_ROOT, "_seedtest", "build", "_distill_fa3_C.so")
 
 
 def main() -> int:

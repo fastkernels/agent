@@ -11,7 +11,7 @@ to 100 tokens is **unchanged** vs the prebuilt baseline.
 
 ## Quick start
 ```bash
-cd /data-fast/agent
+cd <repo>   # the directory containing the fa3agent/ package (on this box: /data-fast/agent)
 python -m fa3agent run  --configs dev  --max-steps 5          # bounded run on the dev config subset
 python -m fa3agent run  --configs full                        # indefinite run (no budget) on the full matrix
 python -m fa3agent run  --resume                              # resume the latest run from its last step
@@ -21,7 +21,10 @@ python -m fa3agent validate                                   # run every compon
 Flags: `--model opus` (headless brain, default), `--run-id NAME`, `--decode-tokens 100`,
 `--no-decode-equiv` (skip the slow greedy gate), `--no-profile` (skip NCU).
 Checkpoints (kernels, lineage, knowledge, plots, logs) go to
-`/code/users/goliaro/cuda-agent-checkpoints/<run-id>/`.
+`$FA3_CHECKPOINT_ROOT/<run-id>/` — default `/code/users/goliaro/cuda-agent-checkpoints/`,
+override with the `FA3_CHECKPOINT_ROOT` env var. Other paths (repo root, vLLM package, HF
+cache, ncu) are auto-derived; override via `FA3_REPO_ROOT` / `FA3_VLLM_PKG` / `FA3_HF_HOME` /
+`FA3_NCU_PYTHON` if needed.
 
 ## How it works
 A deterministic Python **orchestrator** owns control flow (loop, step budget, GPU scheduling,

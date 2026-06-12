@@ -10,12 +10,13 @@ Run from /data-fast/agent with CUDA_VISIBLE_DEVICES=2:
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 from fa3agent import config as C
 from fa3agent.verify.sanitizer import run_sanitizer
 
-SEED_SO = "/code/users/goliaro/cuda-agent-checkpoints/_seedtest/build/_distill_fa3_C.so"
+SEED_SO = os.path.join(C.CHECKPOINT_ROOT, "_seedtest", "build", "_distill_fa3_C.so")
 
 
 def main() -> int:

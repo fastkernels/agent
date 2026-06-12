@@ -27,13 +27,16 @@ from __future__ import annotations
 import os
 import sys
 
+from fa3agent import config as C
+
 # Pin the smoke to GPU 2 (spreads load across the 4 H200s) unless already set.
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "2")
-os.environ.setdefault("HF_HOME", "/data-fast/huggingface")
+if C.HF_HOME:
+    os.environ.setdefault("HF_HOME", C.HF_HOME)
 
 from fa3agent.verify.decode_equiv import check_decode_equiv
 
-SEED_SO = "/code/users/goliaro/cuda-agent-checkpoints/_seedtest/build/_distill_fa3_C.so"
+SEED_SO = os.path.join(C.CHECKPOINT_ROOT, "_seedtest", "build", "_distill_fa3_C.so")
 SEED_NS = "_distill_fa3_C"
 BASELINE_NS = "_vllm_fa3_C"
 

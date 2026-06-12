@@ -11,6 +11,7 @@ Hardware/software facts (this box, verified this session):
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -18,29 +19,73 @@ from typing import Optional
 # --------------------------------------------------------------------------------------
 # Paths
 # --------------------------------------------------------------------------------------
-REPO_ROOT = "/data-fast/agent"
-PKG_DIR = os.path.join(REPO_ROOT, "fa3agent")
+# Every root below is env-overridable so the agent runs on ANY box.  Defaults are derived
+# from this file's location (so the repo can live anywhere) or are this-cluster conventions
+# the spec lets us keep as defaults.
+
+# This package dir (<repo>/fa3agent) and the repo root that contains it, derived from
+# __file__ so they are correct wherever the repo is checked out.  REPO_ROOT (used as the
+# cwd for `python -m fa3agent...` subprocesses) can still be overridden with FA3_REPO_ROOT;
+# PKG_DIR always points at the real package so its bundled resources resolve regardless.
+PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.environ.get("FA3_REPO_ROOT") or os.path.dirname(PKG_DIR)
 RESEARCH_DIR = os.path.join(REPO_ROOT, ".research")
 REFERENCE_DIR = os.path.join(REPO_ROOT, "reference")
 
-# Checkpoints live OUTSIDE the repo (spec requirement).
-CHECKPOINT_ROOT = "/code/users/goliaro/cuda-agent-checkpoints"
+# Checkpoints live OUTSIDE the repo (spec requirement).  The default is this-cluster
+# convention; override with FA3_CHECKPOINT_ROOT on another machine.
+CHECKPOINT_ROOT = os.environ.get("FA3_CHECKPOINT_ROOT") or "/code/users/goliaro/cuda-agent-checkpoints"
 
 # Scratch / working artifacts (gitignored via .gitignore: build/, *.so). Kept inside the
 # checkpoint root so a run is fully self-contained and resumable.
 def run_dir(run_id: str) -> str:
     return os.path.join(CHECKPOINT_ROOT, run_id)
 
-# Prebuilt baseline ("the oracle") shipped inside the installed vLLM.
-VLLM_PKG = "/home/yak/miniconda3/envs/dev/lib/python3.12/site-packages/vllm"
-BASELINE_SO = os.path.join(VLLM_PKG, "vllm_flash_attn", "_vllm_fa3_C.abi3.so")
-VLLM_FA_WRAPPER = os.path.join(VLLM_PKG, "vllm_flash_attn", "flash_attn_interface.py")
+# HuggingFace cache root for the vLLM-based gates.  Honors FA3_HF_HOME / HF_HOME from the
+# environment; when neither is set we leave it empty so HF falls back to its own default
+# (~/.cache/huggingface) instead of a hard-coded box-specific path.
+HF_HOME = os.environ.get("FA3_HF_HOME") or os.environ.get("HF_HOME") or ""
 
-# NCU python module (auto-probed; first existing wins).
+
+def _find_vllm_pkg() -> str:
+    """Locate the installed vLLM package dir WITHOUT importing it (no torch side effects).
+
+    Order: FA3_VLLM_PKG override -> importlib spec for the installed `vllm`.  Returns ""
+    if vLLM isn't installed (the vLLM-dependent gates then report unavailable).
+    """
+    override = os.environ.get("FA3_VLLM_PKG")
+    if override:
+        return override
+    try:
+        spec = importlib.util.find_spec("vllm")
+    except Exception:  # broken finder / partial install -> treat as absent
+        return ""
+    if spec is None:
+        return ""
+    locs = list(getattr(spec, "submodule_search_locations", None) or [])
+    if locs:
+        return locs[0]
+    if spec.origin:
+        return os.path.dirname(spec.origin)
+    return ""
+
+
+# Prebuilt baseline ("the oracle") shipped inside the installed vLLM.  Located via the
+# installed package so it works in any env; override with FA3_VLLM_PKG.
+VLLM_PKG = _find_vllm_pkg()
+BASELINE_SO = os.path.join(VLLM_PKG, "vllm_flash_attn", "_vllm_fa3_C.abi3.so") if VLLM_PKG else ""
+VLLM_FA_WRAPPER = os.path.join(VLLM_PKG, "vllm_flash_attn", "flash_attn_interface.py") if VLLM_PKG else ""
+
+# NCU python module (auto-probed; first existing wins).  ncu_utils also glob-probes the
+# usual install roots, so these are fast-path defaults for this box; FA3_NCU_PYTHON, if set,
+# is tried first.
 NCU_PYTHON_CANDIDATES = [
-    "/opt/nvidia/nsight-compute/2025.3.1/extras/python",
-    "/opt/nvidia/nsight-compute/2025.2.1/extras/python",
-    "/usr/local/cuda/nsight-compute-2025.3.1/extras/python",
+    p for p in (
+        os.environ.get("FA3_NCU_PYTHON"),
+        "/opt/nvidia/nsight-compute/2025.3.1/extras/python",
+        "/opt/nvidia/nsight-compute/2025.2.1/extras/python",
+        "/usr/local/cuda/nsight-compute-2025.3.1/extras/python",
+    ) if p
 ]
 
 # --------------------------------------------------------------------------------------

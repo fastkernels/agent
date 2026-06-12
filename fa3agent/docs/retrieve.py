@@ -24,7 +24,12 @@ try:
 
     _REFERENCE_DIR = _config.REFERENCE_DIR
 except Exception:  # pragma: no cover - fallback if config import path changes
-    _REFERENCE_DIR = "/data-fast/agent/reference"
+    # Derive from this file's location (<repo>/fa3agent/docs/retrieve.py) rather than
+    # hard-coding a box-specific path, so the fallback is still portable.
+    _REFERENCE_DIR = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "reference",
+    )
 
 # ---------------------------------------------------------------------------
 # Bounds (the whole point of this component: distilled, bounded output).

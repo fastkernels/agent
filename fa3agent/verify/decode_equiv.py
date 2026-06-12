@@ -44,6 +44,8 @@ import json
 import subprocess
 from typing import Optional, Tuple
 
+from .. import config as C
+
 # --------------------------------------------------------------------------------------
 # Defaults / knobs (kept tiny so the gate is bounded).
 # --------------------------------------------------------------------------------------
@@ -151,7 +153,8 @@ def _degrade_to_mechanism(so_path: str, namespace: str, reason: str) -> Tuple[bo
 def _run_child(payload: dict) -> Optional[dict]:
     """Run THIS module's __main__ in a fresh spawn process; parse its one result line."""
     env = dict(os.environ)
-    env.setdefault("HF_HOME", "/data-fast/huggingface")
+    if C.HF_HOME:
+        env.setdefault("HF_HOME", C.HF_HOME)
     # Don't let a stray VLLM_ATTENTION_BACKEND override the FA3 path; force FLASH_ATTN.
     env.setdefault("VLLM_ATTENTION_BACKEND", "FLASH_ATTN")
     # CRITICAL: vLLM v1 runs the EngineCore in a SEPARATE process by default
@@ -164,7 +167,7 @@ def _run_child(payload: dict) -> Optional[dict]:
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "fa3agent.verify.decode_equiv", json.dumps(payload)],
-            cwd="/data-fast/agent",
+            cwd=C.REPO_ROOT,
             env=env,
             capture_output=True,
             text=True,
