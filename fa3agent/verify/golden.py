@@ -13,6 +13,8 @@ config; ``golden_baseline_error`` returns a single float. Never a raw dump.
 """
 from __future__ import annotations
 
+import hashlib
+import inspect
 import os
 from typing import Optional
 
@@ -28,9 +30,37 @@ GOLDEN_DIR = os.path.join(C.CHECKPOINT_ROOT, "_golden")
 # Baseline op namespace (the prebuilt "oracle" shipped inside vLLM).
 _BASELINE_NS = "_vllm_fa3_C"
 
-# On-disk cache format version. Bump if the cached dict layout changes so stale
+# On-disk cache format version. Bump if the cached dict LAYOUT changes so stale
 # files are ignored rather than silently mis-read.
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
+
+
+def _input_signature() -> str:
+    """Short hash of the input / fp32-reference construction logic.
+
+    A cached golden (baseline out+lse, fp32 ref, baseline_err) is only valid for
+    the EXACT tensors ``shapes.make_inputs`` builds and the EXACT oracle
+    ``shapes.ref_fp32`` computes. The cache is keyed by (cfg.name, seed), which
+    does NOT change when those builders do -- e.g. when the fp8 configs gained
+    real per-(request, kv-head) descales, a pre-change golden kept the same key
+    and was silently re-used against descale-aware candidate inputs, producing a
+    bogus err_ratio. Folding a hash of the builders' source into the key makes
+    any such change auto-invalidate the cache (recompute) rather than mis-read
+    it. ``fwd_args`` is included because it determines how the baseline op is
+    invoked. Cosmetic edits to these functions also invalidate -- recompute is
+    cheap relative to a silent correctness false-failure, so we err that way.
+    """
+    try:
+        src = "".join(inspect.getsource(fn)
+                      for fn in (shapes.make_inputs, shapes.ref_fp32, shapes.fwd_args))
+    except (OSError, TypeError):
+        return "nosrc"
+    return hashlib.sha1(src.encode("utf-8")).hexdigest()[:10]
+
+
+# Computed once at import; identifies the builder logic this process produces
+# goldens with. Changing make_inputs / ref_fp32 / fwd_args changes this string.
+_INPUT_SIG = _input_signature()
 
 
 def _ensure_baseline_loaded() -> None:
@@ -45,7 +75,7 @@ def _ensure_baseline_loaded() -> None:
 
 
 def _cache_key(cfg: C.Config, seed: int) -> str:
-    return f"{cfg.name}__seed{seed}__v{_CACHE_VERSION}.pt"
+    return f"{cfg.name}__seed{seed}__v{_CACHE_VERSION}_{_INPUT_SIG}.pt"
 
 
 def _cache_path(cfg: C.Config, seed: int) -> str:
