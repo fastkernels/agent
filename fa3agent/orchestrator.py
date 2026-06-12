@@ -141,6 +141,7 @@ class Orchestrator:
         grab("update_plot", "fa3agent.plot.evolution", "update_plot")
         grab("get_hints", "fa3agent.reflib.hints", "get_hints")
         grab("retrieve", "fa3agent.docs.retrieve", "retrieve")
+        grab("get_section", "fa3agent.docs.retrieve", "get_section")
         try:
             from fa3agent.knowledge.store import KnowledgeStore
             comp["KnowledgeStore"] = KnowledgeStore
@@ -195,15 +196,37 @@ class Orchestrator:
                     kh = self.comp["get_hints"]("wgmma bf16") or ""
             except Exception:
                 pass
-            # Proactively retrieve an NVIDIA-docs snippet keyed to this step's FOCUS technique +
-            # bottleneck symptom and inject it (so the docs are surfaced even on steps where the
-            # brain wouldn't think to query; it can still call docs.retrieve for more itself).
+            # Proactively surface NVIDIA docs so they reach the brain even on steps where it
+            # wouldn't query itself (it can still call docs.retrieve/get_section for more).
+            # (a) #2 curated: the authoritative sm_90a section(s) for THIS step's focus technique
+            #     -- deterministic, on-target, independent of the lexical scorer.
+            focus_docs = ""
+            gs = self.comp.get("get_section")
+            if gs:
+                fmap = prompts.FOCUS_DOC_SECTIONS[step % len(prompts.FOCUS_LEVERS)]
+                parts = []
+                for fdoc, fhead in fmap:
+                    try:
+                        s = gs(fdoc, fhead)
+                    except Exception:
+                        s = ""
+                    if s and not s.startswith("("):          # skip "(no section ...)" misses
+                        parts.append(s[:2200])               # bound each section
+                focus_docs = "\n\n".join(parts)[:4200]
+            # (b) #1 scope-balanced lexical hints: guarantee a design-guide + Hopper-spec + PTX
+            #     snippet for the bottleneck instead of one k=2 pull the huge PTX ISA dominates.
             dh = ""
-            try:
-                if self.comp.get("retrieve"):
-                    dh = self.comp["retrieve"](dq, k=2) or ""
-            except Exception:
-                pass
+            rt = self.comp.get("retrieve")
+            if rt:
+                chunks = []
+                for sc in ("design-guides", "architecture-specs", "cuda-docs"):
+                    try:
+                        r = rt(dq, k=1, scope=sc)
+                    except Exception:
+                        r = ""
+                    if r and not r.startswith("("):          # skip "(no relevant sections ...)"
+                        chunks.append(r)
+                dh = ("\n\n" + "-" * 8 + "\n").join(chunks)
             # Feed the run's OWN distilled knowledge back in -- the brain rarely queries the store
             # itself, so inject the top notes keyed to the same focus+bottleneck query.
             kn = ""
@@ -221,6 +244,7 @@ class Orchestrator:
                 knowledge_hints=kh[:1500],
                 knowledge_notes=kn,
                 doc_hints=dh[:3000],
+                focus_docs=focus_docs,
                 focus=focus,
                 supervisor_note=self._supervisor_note)
 

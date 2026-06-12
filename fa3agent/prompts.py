@@ -100,7 +100,8 @@ Then STOP. The driver will build + anti-cheat-scan + verify correctness and repo
 def refine_prompt(candidate_path: str, best_path: str, last_eval_summary: str,
                   profile_feedback: str, knowledge_hints: str, focus: str,
                   supervisor_note: str = "", doc_hints: str = "",
-                  sass_feedback: str = "", knowledge_notes: str = "") -> str:
+                  sass_feedback: str = "", knowledge_notes: str = "",
+                  focus_docs: str = "") -> str:
     return f"""\
 You are optimizing a Hopper FlashAttention-3 kernel (single self-contained .cu). Continue from
 the current CHAMPION at {best_path} (read it). Make TARGETED edits unless you have a concrete
@@ -116,7 +117,11 @@ PROFILER FEEDBACK (distilled, NCU): {profile_feedback or "(none yet)"}
 
 SASS (your kernel's instruction mix — wgmma/TMA presence, register spills): {sass_feedback or "(none)"}
 
-RELEVANT NVIDIA DOCS (auto-retrieved for the above bottleneck; query docs.retrieve for more, or open the file for a full section):
+CORE TECHNIQUE REFERENCE — authoritative sm_90a docs for THIS step's focus (read these first; they
+are curated to the suggested focus below):
+{focus_docs or "(none mapped for this focus — use docs.get_toc/get_section on kernel-patterns.md or hopper-h200.md)"}
+
+RELEVANT NVIDIA DOCS (auto-retrieved per scope for the above bottleneck; query docs.retrieve for more, or open the file for a full section):
 {doc_hints or "(none — query docs.retrieve yourself for exact PTX syntax/layout, e.g. with scope='parallel-thread-execution.md')"}
 
 REFERENCE-LIB HINTS (pure-PTX models for wgmma/TMA/mbarrier/softmax): {knowledge_hints or "(query reflib.get_hints yourself)"}
@@ -151,4 +156,23 @@ FOCUS_LEVERS = [
     "KV sequence with an LSE-weighted combine to raise occupancy.",
     "Tune tile sizes (block_m/block_n), pipeline stages (2-4), and SMEM swizzle for the head dim; "
     "request >48KB dynamic SMEM via cudaFuncSetAttribute.",
+]
+
+# Curated doc sections per FOCUS_LEVER (SAME index): the authoritative sm_90a reference for the
+# exact technique that step is pushing.  The orchestrator get_section()s these and injects them so
+# the brain always has the on-target pattern in front of it -- independent of whether the lexical
+# retriever happened to surface it.  Headings are matched leniently (section numbers optional), so
+# these must stay in sync with reference/design-guides/kernel-patterns.md +
+# reference/architecture-specs/hopper-h200.md (the problem->technique mapping mirrors KernelWiki's
+# queries/by-technique taxonomy).  Keep <=2 sections per lever to bound prompt size.
+FOCUS_DOC_SECTIONS = [
+    [("kernel-patterns.md", "Async execution model"),
+     ("hopper-h200.md", "Tensor Cores (4th Generation)")],
+    [("kernel-patterns.md", "Warp specialization"),
+     ("kernel-patterns.md", "Software pipelining (double buffering)")],
+    [("kernel-patterns.md", "Reduction & online softmax")],
+    [("kernel-patterns.md", "Occupancy tuning"),
+     ("kernel-patterns.md", "Persistent kernels & scheduling")],
+    [("kernel-patterns.md", "Shared memory swizzling"),
+     ("kernel-patterns.md", "GEMM tiling")],
 ]

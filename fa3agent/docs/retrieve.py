@@ -38,6 +38,12 @@ except Exception:  # pragma: no cover - fallback if config import path changes
 # Bounds (the whole point of this component: distilled, bounded output).
 # ---------------------------------------------------------------------------
 SCOPES = ("cuda-docs", "design-guides", "architecture-specs")
+# Off-target architecture specs: the agent targets sm_90a (Hopper H200) ONLY.  Indexing the
+# Ampere/Blackwell deep-dives lets cross-arch sections win retrieval slots and tempts the brain
+# into instructions that are invalid on sm_90a (e.g. Blackwell tcgen05/tmem) -- exactly what the
+# GROUNDING prompt warns against.  They are dropped from the indexed corpus (None / scope-dir
+# walks); an explicit get_section('blackwell-b200.md', ...) by filename still works if ever needed.
+_EXCLUDE_FROM_INDEX = frozenset({"ampere-a100.md", "blackwell-b200.md"})
 # Caps sized so a full dense reference table (the wgmma SMEM descriptor / swizzle sections run
 # ~30-82 lines / 1.5-4KB) comes back WHOLE instead of clipped mid-table -- truncation here was
 # making the brain re-query the same thing 4-5x.  Genuinely huge sections (e.g. the 254-line
@@ -186,7 +192,7 @@ def _scope_files(scope) -> list[str]:
         if not os.path.isdir(ddir):
             continue
         for fn in sorted(os.listdir(ddir)):
-            if fn.endswith(".md"):
+            if fn.endswith(".md") and fn not in _EXCLUDE_FROM_INDEX:
                 files.append(os.path.join(ddir, fn))
     return files
 
