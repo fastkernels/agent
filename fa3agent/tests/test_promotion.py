@@ -101,6 +101,27 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             failures += _fail(f"real-jsonl replay raised: {e!r}")
 
+    # ---- (5) relative band REJECTS a tiny-ratio regression (the bug fix) ----
+    print("[5] min ratchet: relative band rejects a regression at tiny ratios (abs 0.02 would not)")
+    # champ 0.021, candidate 0.015 (28% worst-config regression).  The OLD absolute band 0.02
+    # promoted it (0.015 >= 0.021-0.02 = 0.001); the relative band must REJECT it.
+    series3 = [_rec(True, 0.021, 0.10), _rec(True, 0.015, 0.10)]
+    keep_rel = P.replay_keep_set(series3, "min")                       # default relative band
+    keep_absloose = P.replay_keep_set(series3, "min", noise_band=0.02)  # old absolute behavior
+    if keep_rel == [0] and keep_absloose == [0, 1]:
+        _ok("relative band rejects 0.021->0.015; the old 0.02 absolute band would have promoted it")
+    else:
+        failures += _fail(f"relative band wrong: keep_rel={keep_rel} keep_absloose={keep_absloose}")
+
+    # ---- (6) relative band still absorbs a sub-tolerance dip at high ratios ----
+    print("[6] min ratchet: a <3% lateral move still lands at high ratios")
+    series4 = [_rec(True, 0.80, 0.80), _rec(True, 0.79, 0.82)]   # 1.25% dip, F up
+    keep_hi = P.replay_keep_set(series4, "min")
+    if keep_hi == [0, 1]:
+        _ok("0.80->0.79 (<3%) lands (band = 3% of 0.80 = 0.024)")
+    else:
+        failures += _fail(f"high-ratio lateral move wrongly rejected: {keep_hi}")
+
     print()
     if failures == 0:
         print("SMOKE: PASS (promotion objective)")

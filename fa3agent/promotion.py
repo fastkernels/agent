@@ -59,7 +59,10 @@ def meets_promotion_bar(score: float, champ_score: Optional[float],
 
     No champion yet (None / negative) always promotes.  Under "weighted_geomean" this is a
     match-or-improve test (`score >= champ_F * (1 - f_rel_tol)`) so an equal-score refactor lands;
-    under "min" it is the legacy worst-case ratchet with the noise band.
+    under "min" it is the worst-case ratchet with a RELATIVE noise band -- `band = max(FLOOR,
+    REL * champ_score)` -- so the band scales with the champion's speed instead of an absolute
+    constant that, at tiny ratios, exceeds the whole worst-config ratio and lets regressions land.
+    `noise_band`, when given, overrides with an absolute band (used by offline replay/tests).
     """
     objective = objective or C.PROMOTION_OBJECTIVE
     if champ_score is None or champ_score < 0:
@@ -67,7 +70,10 @@ def meets_promotion_bar(score: float, champ_score: Optional[float],
     if objective == "weighted_geomean":
         tol = C.PROMOTION_F_REL_TOL if f_rel_tol is None else f_rel_tol
         return score >= champ_score * (1.0 - tol)
-    band = C.PERF_NOISE_BAND if noise_band is None else noise_band
+    if noise_band is None:
+        band = max(C.PROMOTION_MIN_BAND_FLOOR, C.PROMOTION_MIN_REL_TOL * max(champ_score, 0.0))
+    else:
+        band = noise_band
     return score >= champ_score - band
 
 

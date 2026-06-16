@@ -403,9 +403,9 @@ PERF_NOISE_BAND = 0.02
 
 # --------------------------------------------------------------------------------------
 # Promotion objective (C1).  Which correct candidate becomes the new champion.
-#   "min"             (DEFAULT = legacy): worst-case ratio (min_ratio) with a max() ratchet +
-#                     PERF_NOISE_BAND.  Greedy on the worst config; cannot fund a structural
-#                     refactor that temporarily dips one config.
+#   "min"             (DEFAULT = legacy): worst-case ratio (min_ratio) with a max() ratchet + a
+#                     RELATIVE noise band (see PROMOTION_MIN_*).  Greedy on the worst config; cannot
+#                     fund a structural refactor that temporarily dips one config.
 #   "weighted_geomean": the weighted-geomean F with a NON-monotone base (champ_F := F on
 #                     promotion) and a small match-or-improve relative tolerance, so an
 #                     equal-overall-score refactor can LAND even without beating the peak.
@@ -414,6 +414,14 @@ PERF_NOISE_BAND = 0.02
 PROMOTION_OBJECTIVE = os.environ.get("FA3_PROMOTION_OBJECTIVE", "min")
 # Match-or-improve relative tolerance for the weighted-geomean objective (1% by default).
 PROMOTION_F_REL_TOL = float(os.environ.get("FA3_PROMOTION_F_REL_TOL", "0.01"))
+# Noise band for the "min" worst-case ratchet, RELATIVE to the champion score (with a small
+# absolute floor): band = max(FLOOR, REL * champ_score); a candidate promotes iff
+# score >= champ_score - band.  An absolute-only band (the old PERF_NOISE_BAND=0.02) swamps the
+# signal once ratios are tiny -- 0.02 is larger than a 0.015 worst-config ratio, so EVERY correct
+# kernel cleared the bar and regressions promoted.  3% relative + 0.001 floor keeps the ratchet
+# meaningful at every scale while still absorbing true measurement noise / lateral refactors.
+PROMOTION_MIN_REL_TOL = float(os.environ.get("FA3_PROMOTION_MIN_REL_TOL", "0.03"))
+PROMOTION_MIN_BAND_FLOOR = float(os.environ.get("FA3_PROMOTION_MIN_BAND_FLOOR", "0.001"))
 
 # --------------------------------------------------------------------------------------
 # Plateau detection + protected rewrite branch (C2/C2b).  A SHARED PlateauState drives both the
