@@ -27,6 +27,7 @@ from . import common, checkpoint, llm, prompts, promotion, runlog
 from .common import BuildResult, AntiCheatResult, ConfigResult, EvalResult, StepRecord
 from .gpu_pool import GPUPool
 from .memory import MemoryStore
+from . import levers
 from .levers import LeverController
 from .plateau import PlateauState
 
@@ -154,6 +155,15 @@ def _sass_flags(rec: Optional[dict]) -> tuple[Optional[bool], Optional[bool], Op
         return None, None, None
     summ = s.get("summary") or {}
     return summ.get("uses_tma"), summ.get("uses_wgmma"), summ.get("uses_fp8_wgmma")
+
+
+def _sass_has(sass: Optional[dict], signal: str) -> bool:
+    """True iff the built kernel's SASS summary confirms `signal` (e.g. uses_wgmma).  An unreadable
+    / failed SASS counts as NOT confirmed -- the completion gate then treats the functionality as
+    not-yet-adopted (conservative; better to re-engage the brain than to wave through a blind miss)."""
+    if not signal or not isinstance(sass, dict) or not sass.get("ok"):
+        return False
+    return bool((sass.get("summary") or {}).get(signal))
 
 
 def _looks_like_mem_bug(ev) -> bool:
@@ -433,16 +443,23 @@ class Orchestrator:
 
     # ---- evaluation ---------------------------------------------------------------------
     def _evaluate(self, step: int, cid: str, ns: str, so_path: str,
-                  uses_wgmma: Optional[bool] = None) -> tuple[EvalResult, dict]:
+                  uses_wgmma: Optional[bool] = None,
+                  precomputed_cres: Optional[list] = None) -> tuple[EvalResult, dict]:
         ev = EvalResult(num_configs=len(self.cfgs))
         profile = {}
-        # CORRECTNESS FIRST
-        self._log(f"[correctness] checking {len(self.cfgs)} configs (synthetic pre-filter)...")
-        try:
-            cres = self.comp["check_correctness"](ns, self.cfgs, seed=self.seed, gpu_id=self.pool.gpu_ids[0])
-        except Exception as e:
-            ev.error = f"correctness raised: {e!r}"
-            return ev, profile
+        # CORRECTNESS FIRST.  Reuse the in-step completion-gate's correctness result when present
+        # (it already ran the same synthetic check on this exact build) instead of re-running it.
+        if precomputed_cres is not None:
+            cres = precomputed_cres
+            self._log(f"[correctness] reusing completion-gate result "
+                      f"({sum(1 for r in cres if r.correct)}/{len(self.cfgs)} passed)")
+        else:
+            self._log(f"[correctness] checking {len(self.cfgs)} configs (synthetic pre-filter)...")
+            try:
+                cres = self.comp["check_correctness"](ns, self.cfgs, seed=self.seed, gpu_id=self.pool.gpu_ids[0])
+            except Exception as e:
+                ev.error = f"correctness raised: {e!r}"
+                return ev, profile
         ev.per_config = cres
         ev.num_correct = sum(1 for r in cres if r.correct)
         ev.correct = ev.num_correct == len(self.cfgs)
@@ -498,6 +515,96 @@ class Orchestrator:
         # candidate that is correct AND improves the best ratio (cost-tiered verification).
         return ev, profile
 
+    # ---- build + scan (one attempt) -----------------------------------------------------
+    def _build_and_scan(self, cid: str, ns: str, cand_path: str, rec: StepRecord):
+        """anti-cheat(source) -> build -> anti-cheat(binary) -> SASS for ONE candidate file.
+
+        Returns (phase, BuildResult|None) where phase is one of:
+          'cheat'        — source or binary anti-cheat rejected (sets rec.anticheat);
+          'env_fatal'    — build failed, unfixable-by-agent;
+          'build_failed' — build failed (fixable);
+          'built'        — compiled OK, SASS analyzed (sets rec.build, rec.sass).
+        Used both for the single legacy pass and for each turn of the in-step completion loop, so
+        re-engaging the brain just re-runs this on the rewritten candidate."""
+        if self.comp.get("anticheat"):
+            ac: AntiCheatResult = self.comp["anticheat"](cand_path, None)
+            rec.anticheat = asdict(ac)
+            if not ac.ok:
+                self._log(f"[anticheat] REJECT: {ac.violations}")
+                return "cheat", None
+
+        bdir = checkpoint.build_dir(self.run_id, cid)
+        self._log(f"[build] compiling {cid} (toolkit-only, sm_90a)...")
+        br: BuildResult = self.comp["build_candidate"](cand_path, ns, bdir)
+        rec.build = asdict(br)
+        if not br.ok:
+            self._log(f"[build] FAILED ({br.duration_s:.0f}s): {br.error[:300]}")
+            return ("env_fatal" if br.env_fatal else "build_failed"), br
+        self._log(f"[build] ok ({br.duration_s:.0f}s) -> {os.path.basename(br.so_path or '')}")
+
+        if self.comp.get("anticheat"):
+            ac2 = self.comp["anticheat"](cand_path, br.so_path)
+            rec.anticheat = asdict(ac2)
+            if not ac2.ok:
+                self._log(f"[anticheat] REJECT (binary): {ac2.violations}")
+                return "cheat", br
+
+        # SASS analysis of the built kernel (its own instruction mix: wgmma/TMA presence, register
+        # spills) -- run once per successful build, independent of correctness; distilled into the
+        # next refine prompt.  cuobjdump-only (no GPU); bounded inside sass.analyze.
+        if self.comp.get("sass_analyze") and br.so_path:
+            try:
+                rec.sass = self.comp["sass_analyze"](br.so_path, ns)
+            except Exception as e:  # noqa - best-effort
+                rec.sass = {"ok": False, "error": repr(e)}
+            sl = _sass_line(rec.sass)
+            if sl:
+                self._log(f"[sass] {sl[:150]}")
+        return "built", br
+
+    def _check_correctness_only(self, ns: str):
+        """Run just the synthetic correctness check (no perf/profile) for the completion gate."""
+        if not self.comp.get("check_correctness"):
+            return None
+        self._log(f"[completion] checking correctness ({len(self.cfgs)} configs)...")
+        try:
+            return self.comp["check_correctness"](ns, self.cfgs, seed=self.seed,
+                                                  gpu_id=self.pool.gpu_ids[0])
+        except Exception as e:  # noqa
+            self._log(f"[completion] correctness check raised: {e!r}")
+            return None
+
+    def _complete_followup(self, cid: str, cand_path: str, lever, want: str, gaps: list,
+                           session_id: Optional[str], attempt: int) -> Optional[str]:
+        """Re-engage the brain to FINISH an incomplete introducing-step before it is committed.
+
+        By default a FRESH session (the relay chokes on real `--resume`, see HEADLESS_RESUME_SESSION)
+        whose prompt re-reads the in-progress candidate + the precise gaps -- functionally the brain
+        continues its own just-written work.  When HEADLESS_RESUME_SESSION is on, the prior session
+        is resumed for true continuity.  Returns the (possibly new) session id."""
+        technique = levers.VERIFY_LABELS.get(want, want)
+        focus = lever.focus if lever else ""
+        prompt = prompts.completion_followup(cand_path, focus, technique, gaps)
+        brain_log = os.path.join(checkpoint.build_dir(self.run_id, cid), f"brain_complete{attempt}.log")
+        sid = session_id if C.HEADLESS_RESUME_SESSION else None
+        self._log(f"[completion] invoking brain ({self.model}, effort={self.effort}) "
+                  f"resume={'yes' if sid else 'fresh'}; streaming -> {brain_log}")
+        t0 = time.time()
+        res = llm.run_claude(prompt, cwd=C.REPO_ROOT, model=self.model, effort=self.effort,
+                             session_id=sid, stream_log=brain_log,
+                             allowed_dirs=[self.paths["run"]],
+                             env_extra={"CLAUDE_CONFIG_DIR": self._brain_claude_dir})
+        dt = time.time() - t0
+        runlog.record("prompt", label=f"complete[{cid}#{attempt}]",
+                      note=f"completion follow-up; transcript -> {brain_log}",
+                      inputs={"model": self.model, "effort": self.effort, "session_id": sid,
+                              "candidate_path": cand_path, "gaps": gaps, "prompt": prompt},
+                      output={"ok": res.ok, "session_id": res.session_id, "error": res.error,
+                              "candidate_written": os.path.exists(cand_path), "result_text": res.text},
+                      duration_s=dt, max_chars=1_000_000)
+        self._log(f"[completion] brain returned in {dt:.0f}s (ok={res.ok})")
+        return res.session_id or session_id
+
     # ---- one step -----------------------------------------------------------------------
     def _step(self, step: int, prev: Optional[dict], best: Optional[dict],
               branch: Optional[dict] = None, seed_path: Optional[str] = None) -> StepRecord:
@@ -512,6 +619,8 @@ class Orchestrator:
         self._log(f"=== STEP {step} ({cid}, ns={ns}) ===")
         lever = None
         lever_id = None
+        src_rec = None   # the kernel this step builds FROM (champion / branch tip); its SASS is the
+        # "before" state the in-step completion gate compares against to decide "new functionality".
         if branch is not None:
             # Inside the protected branch: rung-0 is a behavior-preserving refactor (D1); later
             # rungs walk the transform catalog keyed by the branch bottleneck (D2).
@@ -524,6 +633,7 @@ class Orchestrator:
                 label = _label_of((prev or {}).get("profile")) or _label_of(best.get("profile"))
                 # B3b: SASS of the branch tip (prev) if known, else the seed/champion (best).
                 src = prev if (isinstance(prev, dict) and prev.get("sass")) else best
+                src_rec = src
                 uses_tma, uses_wgmma, uses_fp8_wgmma = _sass_flags(src)
                 worst_dtype = (((src or {}).get("profile")) or {}).get("worst_dtype")
                 lever = self._levers.select(label, step, uses_tma=uses_tma, uses_wgmma=uses_wgmma,
@@ -537,6 +647,7 @@ class Orchestrator:
             # B3b: gate on the champion's SASS (wgmma+TMA presence) so an overlap-bound kernel that
             # still lacks TMA lands the TMA pipeline before warp-specialization.
             label = _label_of(best.get("profile"))
+            src_rec = best
             uses_tma, uses_wgmma, uses_fp8_wgmma = _sass_flags(best)
             worst_dtype = (best.get("profile") or {}).get("worst_dtype")
             lever = self._levers.select(label, step, uses_tma=uses_tma, uses_wgmma=uses_wgmma,
@@ -556,57 +667,81 @@ class Orchestrator:
             rec.status = "no_candidate"
             return rec
 
-        # anti-cheat (source) — fast, before building
-        if self.comp.get("anticheat"):
-            ac: AntiCheatResult = self.comp["anticheat"](cand_path, None)
-            rec.anticheat = asdict(ac)
-            if not ac.ok:
-                rec.status = "cheat"
-                self._log(f"[anticheat] REJECT: {ac.violations}")
-                self._distill(rec, f"Anti-cheat rejected: {ac.violations}", ntype="alg")
-                return rec
+        # In-step COMPLETION GATE (config.COMPLETION_GATE): when this step's lever is meant to
+        # INTRODUCE a new functionality (it carries a SASS `verify` signal AND the source kernel
+        # lacks it), verify the BUILT candidate actually adopts it + stays correct; if not, re-engage
+        # the brain on the SAME file to finish the change before the step is committed.  General
+        # over every such lever (no per-optimization rule) -- trigger + check come from metadata.
+        want = (lever.verify if lever else "") or ""
+        src_flag = None
+        if want:
+            _st, _sw, _sf = _sass_flags(src_rec)
+            src_flag = {"uses_tma": _st, "uses_wgmma": _sw, "uses_fp8_wgmma": _sf}.get(want)
+        # "introducing" iff the source did NOT already have the signal (False or unknown -> verify;
+        # only an explicit True means it is a refinement of an existing path -> skip the gate).
+        check_adoption = bool(C.COMPLETION_GATE and want and lever is not None and src_flag is not True)
 
-        # build
-        bdir = checkpoint.build_dir(self.run_id, cid)
-        self._log(f"[build] compiling {cid} (toolkit-only, sm_90a)...")
-        br: BuildResult = self.comp["build_candidate"](cand_path, ns, bdir)
-        rec.build = asdict(br)
-        if not br.ok:
-            rec.status = "build_failed"
-            self._log(f"[build] FAILED ({br.duration_s:.0f}s): {br.error[:300]}")
-            self._distill(rec, f"Build failed: {br.error[:400]}", ntype="ks")
-            if br.env_fatal:
+        cres = None            # completion-gate correctness result, reused by _evaluate when set
+        attempt = 0
+        while True:
+            phase, br = self._build_and_scan(cid, ns, cand_path, rec)
+            if phase == "cheat":
+                rec.status = "cheat"
+                self._distill(rec, f"Anti-cheat rejected: {(rec.anticheat or {}).get('violations')}",
+                              ntype="alg")
+                return rec
+            if phase == "env_fatal":
                 rec.status = "env_fatal"
-            return rec
-        self._log(f"[build] ok ({br.duration_s:.0f}s) -> {os.path.basename(br.so_path or '')}")
-
-        # anti-cheat (binary)
-        if self.comp.get("anticheat"):
-            ac2 = self.comp["anticheat"](cand_path, br.so_path)
-            rec.anticheat = asdict(ac2)
-            if not ac2.ok:
-                rec.status = "cheat"
-                self._log(f"[anticheat] REJECT (binary): {ac2.violations}")
-                self._distill(rec, f"Anti-cheat (binary) rejected: {ac2.violations}", ntype="alg")
+                self._distill(rec, f"Build failed (env): {(br.error if br else '')[:400]}", ntype="ks")
                 return rec
+            if not check_adoption:
+                break    # not an introducing step -> single pass (legacy behavior)
 
-        # SASS analysis of the built kernel (its own instruction mix: wgmma/TMA presence, register
-        # spills) -- run once per successful build, independent of correctness; distilled into the
-        # next refine prompt.  cuobjdump-only (no GPU); bounded inside sass.analyze.
-        if self.comp.get("sass_analyze") and br.so_path:
-            try:
-                rec.sass = self.comp["sass_analyze"](br.so_path, ns)
-            except Exception as e:  # noqa - best-effort
-                rec.sass = {"ok": False, "error": repr(e)}
-            sl = _sass_line(rec.sass)
-            if sl:
-                self._log(f"[sass] {sl[:150]}")
+            # What is still missing for this step to have fully/correctly landed its functionality?
+            gaps: list[str] = []
+            cres = None
+            if phase == "build_failed":
+                gaps.append(f"BUILD FAILED — the new code does not compile: {(br.error if br else '')[:350]}")
+            else:  # built ok
+                if not _sass_has(rec.sass, want):
+                    gaps.append(f"{levers.VERIFY_LABELS.get(want, want)} — but SASS shows it is NOT "
+                                f"present, so the intended path was not actually taken")
+                cres = self._check_correctness_only(ns)
+                if cres is not None:
+                    bad = [r.config for r in cres if not r.correct]
+                    if bad:
+                        gaps.append(f"correctness regressed — wrong on configs: {bad[:6]}")
+            if not gaps:
+                self._log(f"[completion] '{lever.id}' landed cleanly "
+                          f"(attempt {attempt}): {want}=True, correct")
+                break
+            if attempt >= C.MAX_COMPLETION_ATTEMPTS or not session_id:
+                self._log(f"[completion] '{lever.id}' still incomplete after {attempt} fix "
+                          f"attempt(s); committing as-is. gaps={gaps}")
+                break
+            attempt += 1
+            self._log(f"[completion] attempt {attempt}/{C.MAX_COMPLETION_ATTEMPTS}: re-engaging brain "
+                      f"to finish '{lever.id}'. gaps={gaps}")
+            session_id = self._complete_followup(cid, cand_path, lever, want, gaps, session_id, attempt)
+            rec.session_id = session_id
+            rec.completion_attempts = attempt
+            if not os.path.exists(cand_path):
+                self._log("[completion] candidate file vanished after follow-up; committing prior build")
+                break
+
+        # Couldn't get a buildable candidate (introducing step exhausted its budget still failing,
+        # or a non-introducing build failure) -> same terminal handling as before.
+        if phase in ("build_failed", "env_fatal"):
+            rec.status = "build_failed" if phase == "build_failed" else "env_fatal"
+            self._distill(rec, f"Build failed: {(br.error if br else '')[:400]}", ntype="ks")
+            return rec
 
         # SASS ground truth (HGMMA/QGMMA present) -> steers the NCU bottleneck classifier (B2).
         uses_wgmma = None
         if isinstance(rec.sass, dict) and rec.sass.get("ok"):
             uses_wgmma = (rec.sass.get("summary") or {}).get("uses_wgmma")
-        ev, profile = self._evaluate(step, cid, ns, br.so_path, uses_wgmma=uses_wgmma)
+        ev, profile = self._evaluate(step, cid, ns, br.so_path, uses_wgmma=uses_wgmma,
+                                     precomputed_cres=cres)
 
         # Sanitizer (memcheck) ONLY when a built kernel fails correctness in a way that smells like a
         # memory bug (raised / NaN-inf / illegal / shape) -- a bounded report instead of leaving the

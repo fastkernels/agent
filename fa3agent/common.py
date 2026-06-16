@@ -113,6 +113,7 @@ class StepRecord:
     knowledge_note: Optional[str] = None
     focus: Optional[str] = None        # the steer/lever applied this step (E1 causal lessons)
     lever_id: Optional[str] = None     # id of the B3 lever applied this step (outcome tracking)
+    completion_attempts: int = 0       # in-step completion-gate follow-up turns spent this step
     session_id: Optional[str] = None   # Claude headless session for resume continuity
     is_best: bool = False
     timestamp: float = field(default_factory=now)

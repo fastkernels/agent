@@ -159,6 +159,43 @@ Then STOP. The driver will build + anti-cheat + verify correctness + profile and
 """
 
 
+def completion_followup(candidate_path: str, focus: str, technique_label: str,
+                        gaps: list) -> str:
+    """In-step COMPLETION GATE follow-up: the brain just wrote `candidate_path` to INTRODUCE a new
+    functionality, but the built kernel did not fully/correctly land it.  Hand it the precise gaps
+    and tell it to FINISH the same file in place (not restart, not revert).  Used as a FRESH
+    session by default, so it must RE-READ the candidate -- the file on disk is the continuity."""
+    gap_block = "\n".join(f"  - {g}" for g in (gaps or [])) or "  - (unspecified)"
+    return f"""\
+You just wrote a Hopper FlashAttention-3 candidate to {candidate_path} for this step's goal:
+  {focus}
+
+The driver built and checked it, and the change is INCOMPLETE — it did not fully/correctly land
+the intended functionality. Concrete gaps found in the BUILT kernel:
+{gap_block}
+
+FINISH IT IN PLACE — do NOT start over and do NOT revert to the previous approach:
+1. READ the current {candidate_path} (it is the file you just wrote) so you continue YOUR work.
+2. Complete the implementation so that {technique_label} is ACTUALLY present in the compiled
+   kernel — not stubbed, not guarded out behind a disabled #if/branch, not left on the scalar
+   fallback — AND every config stays correct. If the build failed, fix the compile error; if a
+   config is numerically wrong, fix it; if the instruction class is absent from SASS, make the
+   REAL (taken) code path use it.
+3. You may build the .so and inspect SASS yourself (fa3agent.sass.analyze.analyze) to CONFIRM the
+   instruction class is present before you finish — optional but encouraged.
+
+{CONTRACT}
+
+{GROUNDING}
+
+{TOOLS}
+
+WRITE the completed candidate back to EXACTLY this path (overwrite):
+  {candidate_path}
+Then STOP. The driver will rebuild + anti-cheat + verify correctness + profile and report back.
+"""
+
+
 # D1 rung-0: a behavior-preserving refactor (no new features, no perf chase) that turns the
 # encrusted seed into a clean, extensible substrate for the structural rungs that follow.
 BRANCH_REFACTOR_FOCUS = (

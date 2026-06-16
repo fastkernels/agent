@@ -46,6 +46,12 @@ class Lever:
     # reflib.get_hints query for THIS lever's technique (populated from _HINTS_TOPIC below); the
     # readable pure-PTX model mined from ThunderKittens/DeepGEMM/flashinfer/FlashMLA.
     hints: str = ""
+    # SASS-summary key whose presence CONFIRMS this lever actually landed its new functionality
+    # (populated from _VERIFY_SIGNAL below).  Empty for levers with no single binary signature
+    # (micro tweaks, occupancy/scheduling).  Drives the in-step COMPLETION GATE (config.COMPLETION
+    # _GATE): when set AND the source kernel lacks the signal, the step is "introducing" it and the
+    # driver verifies adoption on the built candidate before committing the step.
+    verify: str = ""
 
 
 # ---- the catalog (B3 lever list == D2 transform catalog) --------------------------------------
@@ -255,6 +261,30 @@ _HINTS_TOPIC = {
 }
 for _lv in CATALOG:
     _lv.hints = _HINTS_TOPIC.get(_lv.id, _lv.id.replace("-", " "))
+
+# Per-lever ADOPTION signal for the in-step completion gate: the SASS-summary key that must be
+# True once the lever's new functionality is really present in the compiled kernel.  Only the
+# levers whose whole point is to introduce a distinct instruction CLASS get one -- so the gate
+# fires for "did the brain actually put it on tensor cores / TMA?" and stays silent for tweaks
+# that have no clean binary signature.  Adding a future foundation lever = one entry here.
+_VERIFY_SIGNAL = {
+    "wgmma-tensorcore": "uses_wgmma",
+    "tma-multistage-pipeline": "uses_tma",
+    "fp8-wgmma-promote": "uses_fp8_wgmma",
+}
+for _lv in CATALOG:
+    _lv.verify = _VERIFY_SIGNAL.get(_lv.id, "")
+
+# Human-readable name of each adoption signal, for the completion follow-up prompt (what the brain
+# must make actually appear in the built kernel).
+VERIFY_LABELS = {
+    "uses_wgmma": ("wgmma.mma_async tensor-core instructions (HGMMA/QGMMA must appear in the "
+                   "compiled SASS) — the QK^T and/or P*V GEMMs must run on tensor cores, not scalar FFMA"),
+    "uses_tma": ("TMA async bulk copies (cp.async.bulk.tensor; UTMALDG/UBLKCP must appear in the "
+                 "compiled SASS) — the K/V (and/or Q) tile loads must go through the TMA pipeline"),
+    "uses_fp8_wgmma": ("fp8 wgmma (QGMMA must appear in the compiled SASS) — the fp8/e4m3 path must "
+                       "run on tensor cores via the .e4m3 wgmma variant, not the scalar FFMA fallback"),
+}
 
 
 def lever_by_id(lever_id: str) -> Optional[Lever]:

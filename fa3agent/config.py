@@ -165,6 +165,19 @@ HEADLESS_RESUME_SESSION = False
 HEADLESS_HEARTBEAT_S = 120
 HEADLESS_FAILURE_RETRIES = 1
 
+# In-step COMPLETION GATE.  When a step's lever is meant to INTRODUCE a new functionality -- a
+# lever that carries a SASS `verify` signal (wgmma / TMA / fp8-wgmma) the kernel it is building
+# FROM does not already have -- the driver checks the BUILT candidate actually adopts it (the
+# instruction class shows up in SASS) AND stays correct.  If a gap remains, it re-engages the brain
+# on the SAME candidate file with the precise gaps and lets it COMPLETE the change before the step
+# is committed/evaluated, up to MAX_COMPLETION_ATTEMPTS extra turns.  This generalizes over every
+# such lever (no per-optimization rule): the trigger and the check are read from lever metadata.
+# The follow-up is a FRESH brain session that RE-READS the in-progress candidate + the gaps (true
+# `--resume` is gated by HEADLESS_RESUME_SESSION, which is off because the relay chokes on it);
+# functionally the brain still continues its own just-written work.  Set the gate to 0 to disable.
+COMPLETION_GATE = os.environ.get("FA3_COMPLETION_GATE", "1") not in ("0", "false", "False")
+MAX_COMPLETION_ATTEMPTS = int(os.environ.get("FA3_MAX_COMPLETION_ATTEMPTS", "2"))
+
 
 # Toolkit-only nvcc flags (NO cutlass/cute include path -> anti-cheat by construction).
 NVCC_BASE_FLAGS = [

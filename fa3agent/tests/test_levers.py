@@ -11,7 +11,10 @@ Covers:
     different lever for the same bottleneck is chosen instead); a landing resets the streak;
   - outcome classification (landed/regressed/no_effect/failed);
   - the structural-outcome history (for C2) + ledger summary (for MEMORY.md);
-  - state persists across a reload (resume-safe).
+  - state persists across a reload (resume-safe);
+  - completion-gate metadata: the foundation levers (wgmma/TMA/fp8-wgmma) carry a SASS `verify`
+    adoption signal (and nothing else does), and the "introduces new functionality" trigger is a
+    pure function of that metadata + the source kernel's SASS.
 """
 from __future__ import annotations
 
@@ -223,6 +226,36 @@ def main() -> int:
             _ok("fp8 gate fires only for a scalar fp8 worst-config with existing wgmma infra")
         else:
             failures += _fail(f"fp8 gate wrong: {bad}")
+
+    # ---- (10b) completion-gate metadata + the "introducing a new functionality" trigger ----
+    print("[10b] completion-gate: foundation levers carry a SASS verify signal; trigger is metadata")
+    from fa3agent.orchestrator import _sass_has
+    # the three foundation levers carry their adoption signal; nothing else does
+    want_verify = {"wgmma-tensorcore": "uses_wgmma",
+                   "tma-multistage-pipeline": "uses_tma",
+                   "fp8-wgmma-promote": "uses_fp8_wgmma"}
+    got_verify = {lv.id: lv.verify for lv in L.CATALOG if lv.verify}
+    labels_ok = all(sig in L.VERIFY_LABELS for sig in want_verify.values())
+    # _sass_has: confirmed only when SASS ok AND the summary flag is truthy
+    sass_ok = (_sass_has({"ok": True, "summary": {"uses_wgmma": True}}, "uses_wgmma")
+               and not _sass_has({"ok": True, "summary": {"uses_wgmma": False}}, "uses_wgmma")
+               and not _sass_has({"ok": False}, "uses_wgmma")            # unreadable -> not confirmed
+               and not _sass_has(None, "uses_wgmma"))
+
+    def _introduces(want, src_flag):
+        # mirrors orchestrator._step: gate fires when the lever wants a signal the source LACKS
+        # (False or unknown); an explicit True means it is a refinement -> skip.
+        return bool(want and src_flag is not True)
+
+    trigger_ok = (_introduces("uses_wgmma", False)        # source has no wgmma -> introduce
+                  and _introduces("uses_wgmma", None)     # unknown source SASS -> verify
+                  and not _introduces("uses_wgmma", True)  # already on wgmma -> refinement, skip
+                  and not _introduces("", False))          # micro lever (no signal) -> never gated
+    if got_verify == want_verify and labels_ok and sass_ok and trigger_ok:
+        _ok("verify signals on the 3 foundation levers only; _sass_has + introduce-trigger correct")
+    else:
+        failures += _fail(f"verify={got_verify} labels_ok={labels_ok} sass_ok={sass_ok} "
+                          f"trigger_ok={trigger_ok}")
 
     # ---- (10) every lever has a reflib hints topic that resolves to a real topic ----
     print("[10] every lever's get_hints topic resolves (no hardcoded single topic)")
