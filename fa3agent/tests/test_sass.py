@@ -26,7 +26,7 @@ from fa3agent import config              # noqa: E402
 from fa3agent.sass import analyze        # noqa: E402
 from fa3agent.sass import cutlass_oracle  # noqa: E402
 
-SEED_SO = os.path.join(config.CHECKPOINT_ROOT, "_seedtest", "build", "_distill_fa3_C.so")
+SEED_SO = os.path.join(config.WORK_ROOT, "_seedtest", "build", "_distill_fa3_C.so")
 
 
 def _check(cond: bool, msg: str, fails: list):

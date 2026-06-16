@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from fa3agent import config as C
 from fa3agent.verify.insitu import check_insitu
 
-SEED_SO = os.path.join(C.CHECKPOINT_ROOT, "_seedtest", "build", "_distill_fa3_C.so")
+SEED_SO = os.path.join(C.WORK_ROOT, "_seedtest", "build", "_distill_fa3_C.so")
 
 if __name__ == "__main__":
     r = check_insitu(SEED_SO, "_distill_fa3_C", num_steps=2)

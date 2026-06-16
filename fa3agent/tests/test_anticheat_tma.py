@@ -22,7 +22,7 @@ import tempfile
 from fa3agent.sandbox import anticheat, build
 from fa3agent import config as C
 
-SMOKE_ROOT = os.path.join(C.CHECKPOINT_ROOT, "_smoke", "anticheat_tma")
+SMOKE_ROOT = os.path.join(C.WORK_ROOT, "_smoke", "anticheat_tma")
 
 # A synthetic `nm -D` dump exercising the false-positive and the true-positive cases.
 _FAKE_NM = """\

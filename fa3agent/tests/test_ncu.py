@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from fa3agent import config as C  # noqa: E402
 from fa3agent.perf import ncu_profile  # noqa: E402
 
-SEED_SO = os.path.join(C.CHECKPOINT_ROOT, "_seedtest", "build", "_distill_fa3_C.so")
+SEED_SO = os.path.join(C.WORK_ROOT, "_seedtest", "build", "_distill_fa3_C.so")
 SEED_NS = "_distill_fa3_C"
 
 

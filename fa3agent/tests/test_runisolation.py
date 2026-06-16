@@ -11,7 +11,9 @@ CHECKPOINT_ROOT roots and asserts:
     brain's per-run .claude config dir;
   - RESUME restores the live workdir from the archive and does NOT wipe;
   - the run_claude F4 guard refuses any CHECKPOINT_ROOT path via cwd / --add-dir / prompt;
-  - the brain's CLAUDE_CONFIG_DIR resolves under the workdir.
+  - the brain's CLAUDE_CONFIG_DIR resolves under the workdir;
+  - the golden cache lives in WORK_ROOT scratch (NOT the durable archive, NOT inside the per-run
+    dir the brain gets via --add-dir).
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ import tempfile
 
 from fa3agent import config as C
 from fa3agent import checkpoint, llm
+from fa3agent.verify import golden
 
 
 def _ok(msg: str) -> None:
@@ -125,6 +128,19 @@ def main() -> int:
             _ok(f"brain config under WORK_ROOT; repo slug={slug!r}")
         else:
             failures += _fail(f"brain config/slug wrong: cfg={brain_cfg} slug={slug!r}")
+
+        # ---- (7) golden cache is WORK_ROOT scratch, not the archive, not brain-visible ----
+        print("[7] golden cache under WORK_ROOT scratch (sibling of run dirs)")
+        gd = os.path.normpath(golden.golden_dir())
+        run_dir = os.path.normpath(checkpoint.paths("run_AAA")["run"])  # what the brain gets via --add-dir
+        under_work = gd.startswith(os.path.normpath(work) + os.sep)
+        not_in_archive = not gd.startswith(os.path.normpath(arch))
+        not_in_run = not (gd == run_dir or gd.startswith(run_dir + os.sep))
+        if under_work and not_in_archive and not_in_run:
+            _ok(f"golden_dir under WORK_ROOT, outside archive + run dir: {gd}")
+        else:
+            failures += _fail(f"golden_dir leaks: dir={gd} under_work={under_work} "
+                              f"not_in_archive={not_in_archive} not_in_run={not_in_run}")
 
     finally:
         C.WORK_ROOT, C.CHECKPOINT_ROOT = saved

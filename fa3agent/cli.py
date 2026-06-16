@@ -62,11 +62,23 @@ def cmd_run(a):
     if not run_id:
         run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}"
 
-    # Tee the whole run narrative into <run_dir>/run.log so the live progress log lives
-    # inside the run folder (what `tail -f .../run_*/run.log` expects), in addition to
-    # whatever the launcher does with stdout.  Best-effort: never let logging-setup break
-    # the run.
-    run_dir = os.path.join(C.CHECKPOINT_ROOT, run_id)
+    print(f"run_id={run_id}  configs={a.configs}  max_steps={a.max_steps}  model={a.model}  "
+          f"effort={a.effort}  resume={a.resume}")
+
+    # Build the orchestrator FIRST: its init prepares the LIVE workdir under WORK_ROOT (a fresh run
+    # WIPES WORK_ROOT, a resume restores it from the archive).  We then tee the run narrative into
+    # the workdir's run.log -- the live working copy -- which F3 mirrors to the durable archive each
+    # step.  (Writing run.log straight into CHECKPOINT_ROOT would put a live-written file in the
+    # archive that the brain's workdir never owns; the archive is a MIRROR, not a live target.)
+    orch = Orchestrator(run_id, config_set=a.configs, max_steps=a.max_steps, model=a.model,
+                        effort=a.effort,
+                        decode_tokens=a.decode_tokens, do_decode_equiv=not a.no_decode_equiv,
+                        profile_enabled=not a.no_profile, resume=a.resume)
+
+    # Tee the whole run narrative into <workdir>/run.log so the live progress log lives inside the
+    # live run folder (what `tail -f .../run_*/run.log` expects), in addition to whatever the
+    # launcher does with stdout.  Best-effort: never let logging-setup break the run.
+    run_dir = orch.paths["run"]
     log_fh = None
     saved = None
     try:
@@ -81,15 +93,9 @@ def cmd_run(a):
         log_fh = None
 
     try:
-        print(f"run_id={run_id}  configs={a.configs}  max_steps={a.max_steps}  model={a.model}  "
-              f"effort={a.effort}  resume={a.resume}")
-        orch = Orchestrator(run_id, config_set=a.configs, max_steps=a.max_steps, model=a.model,
-                            effort=a.effort,
-                            decode_tokens=a.decode_tokens, do_decode_equiv=not a.no_decode_equiv,
-                            profile_enabled=not a.no_profile, resume=a.resume)
         result = orch.run()
         print("RESULT:", result)
-        print("checkpoint:", os.path.join(C.CHECKPOINT_ROOT, run_id))
+        print("checkpoint:", C.archive_dir(run_id))
         return 0
     finally:
         if saved is not None:

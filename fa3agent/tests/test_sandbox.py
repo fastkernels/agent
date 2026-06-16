@@ -19,7 +19,7 @@ from fa3agent.sandbox import build, anticheat
 from fa3agent import config as C
 
 SEED_CU = os.path.join(C.PKG_DIR, "seed_kernel.cu")
-SMOKE_ROOT = os.path.join(C.CHECKPOINT_ROOT, "_smoke", "sandbox")
+SMOKE_ROOT = os.path.join(C.WORK_ROOT, "_smoke", "sandbox")
 
 
 def _ok(msg: str) -> None:

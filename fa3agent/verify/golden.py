@@ -3,10 +3,17 @@
 The "golden" for a config is the prebuilt baseline op's output: the baseline
 out + softmax_lse, plus the baseline's own error against the pure-fp32 reference
 (`shapes.ref_fp32`). These are deterministic for a given (cfg, seed), so we
-compute them ONCE and cache the tensors to disk (torch.save) under
-``CHECKPOINT_ROOT/_golden``. Repeated calls (every verify iteration of the
-evolution loop) then just torch.load instead of re-running the baseline + the
-slow fp32 oracle.
+compute them ONCE and cache the tensors to disk (torch.save) under the LIVE
+scratch root (``WORK_ROOT/_golden``; override ``FA3_GOLDEN_DIR``). Repeated calls
+(every verify iteration of the evolution loop) then just torch.load instead of
+re-running the baseline + the slow fp32 oracle.
+
+Why WORK_ROOT and not CHECKPOINT_ROOT: the golden cache is regenerable scratch, so
+it lives with the live run, NOT in the durable archive (run isolation, Workstream
+F).  It sits as a SIBLING of the per-run dirs (not inside ``WORK_ROOT/<run_id>``)
+so it is never exposed to the brain via ``--add-dir`` and never mirrored to the
+archive; a fresh run wipes WORK_ROOT, so it is rebuilt per fresh run and shared
+across that run's many verify iterations.
 
 Context discipline: ``get`` returns a small dict of tensors/floats for ONE
 config; ``golden_baseline_error`` returns a single float. Never a raw dump.
@@ -24,8 +31,13 @@ from .. import config as C
 from .. import shapes
 
 
-# Where cached golden tensors live (outside the repo, with the rest of the run).
-GOLDEN_DIR = os.path.join(C.CHECKPOINT_ROOT, "_golden")
+def golden_dir() -> str:
+    """Where cached golden tensors live: LIVE scratch under WORK_ROOT (override FA3_GOLDEN_DIR).
+
+    Resolved lazily (not a module constant) so it tracks C.WORK_ROOT even when tests monkeypatch the
+    roots, and so it is never the durable CHECKPOINT_ROOT.
+    """
+    return os.environ.get("FA3_GOLDEN_DIR") or os.path.join(C.WORK_ROOT, "_golden")
 
 # Baseline op namespace (the prebuilt "oracle" shipped inside vLLM).
 _BASELINE_NS = "_vllm_fa3_C"
@@ -79,7 +91,7 @@ def _cache_key(cfg: C.Config, seed: int) -> str:
 
 
 def _cache_path(cfg: C.Config, seed: int) -> str:
-    return os.path.join(GOLDEN_DIR, _cache_key(cfg, seed))
+    return os.path.join(golden_dir(), _cache_key(cfg, seed))
 
 
 class GoldenCache:
@@ -89,8 +101,8 @@ class GoldenCache:
     by a torch.save'd file on disk (fast across processes / loop iterations).
     """
 
-    def __init__(self, cache_dir: str = GOLDEN_DIR, device: str = "cuda"):
-        self.cache_dir = cache_dir
+    def __init__(self, cache_dir: Optional[str] = None, device: str = "cuda"):
+        self.cache_dir = cache_dir or golden_dir()
         self.device = device
         self._mem: dict[str, dict] = {}
         os.makedirs(self.cache_dir, exist_ok=True)
