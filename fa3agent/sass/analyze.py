@@ -262,6 +262,7 @@ def _summarize(agg: dict) -> dict:
         verdict.append("uses wgmma + TMA, no spills")
     return {
         "uses_wgmma": has_wgmma,
+        "uses_fp8_wgmma": agg.get("QGMMA", 0) > 0,   # fp8 e4m3/e5m2 wgmma (vs bf16 HGMMA)
         "uses_tma": has_tma,
         "spills": spills,
         "wgmma_count": agg.get("HGMMA", 0) + agg.get("QGMMA", 0) + agg.get("IGMMA", 0),

@@ -137,6 +137,107 @@ def main() -> int:
         else:
             failures += _fail(f"fallback not deterministic: {a} vs {b}")
 
+    # ---- (8) TMA/tensor-core foundation gate (B3b) ----
+    print("[8] foundation gate: overlap/off-tensor-core lands wgmma then TMA before warp-spec")
+    with tempfile.TemporaryDirectory() as d:
+        c = LeverController(d)
+        cases = [
+            # (label, uses_tma, uses_wgmma) -> expected lever
+            (("off-tensor-core", False, False), "wgmma-tensorcore"),   # no wgmma -> land wgmma first
+            (("overlap-bound", False, True), "tma-multistage-pipeline"),  # wgmma but no TMA -> TMA
+            (("off-tensor-core", False, True), "tma-multistage-pipeline"),
+            (("overlap-bound", True, True), "warp-specialize"),        # foundation present -> warp-spec
+            (("overlap-bound", None, None), "warp-specialize"),        # unknown SASS -> gate skipped
+        ]
+        bad = {}
+        for (label, ut, uw), want in cases:
+            got = c.select(label, 0, uses_tma=ut, uses_wgmma=uw).id
+            if got != want:
+                bad[(label, ut, uw)] = f"{got}!={want}"
+        if not bad:
+            _ok("foundation gate routes wgmma->TMA->warp-spec; skipped when SASS unknown")
+        else:
+            failures += _fail(f"gate wrong: {bad}")
+
+    # ---- (8b) gate yields to warp-spec once the TMA foundation lever is exhausted ----
+    with tempfile.TemporaryDirectory() as d:
+        c = LeverController(d)
+        for _ in range(L.LEVER_MAX_FAILS):
+            c.record_outcome("tma-multistage-pipeline", "failed", step=0)
+        got = c.select("overlap-bound", 1, uses_tma=False, uses_wgmma=True).id
+        if got == "warp-specialize":
+            _ok("exhausted TMA foundation -> falls through to warp-specialize")
+        else:
+            failures += _fail(f"expected warp-specialize after TMA exhausted, got {got}")
+
+    # ---- (9) structural-first: a micro lever is never chosen for a structural bottleneck ----
+    print("[9] structural-first ordering (softmax-log2 no longer routed to overlap-bound)")
+    so_log2 = L.lever_by_id("softmax-log2")
+    if "overlap-bound" not in so_log2.bottlenecks:
+        # with the foundation present, overlap-bound must pick a STRUCTURAL lever, not softmax-log2
+        with tempfile.TemporaryDirectory() as d:
+            c = LeverController(d)
+            lv = c.select("overlap-bound", 0, uses_tma=True, uses_wgmma=True)
+            if lv.kind == L.STRUCTURAL and lv.id != "softmax-log2":
+                _ok(f"overlap-bound -> structural lever ({lv.id}), micro softmax-log2 excluded")
+            else:
+                failures += _fail(f"overlap-bound picked non-structural/softmax: {lv.id} ({lv.kind})")
+    else:
+        failures += _fail("softmax-log2 still mapped to overlap-bound")
+
+    # ---- (9b) breadth-first structural exploration reaches ping-pong for overlap-bound ----
+    print("[9b] overlap-bound explores structural levers breadth-first (warp-spec then ping-pong)")
+    with tempfile.TemporaryDirectory() as d:
+        c = LeverController(d)
+        first = c.select("overlap-bound", 0, uses_tma=True, uses_wgmma=True).id
+        c.record_outcome(first, "landed", step=0)               # warp-spec landed (NOT exhausted)
+        second = c.select("overlap-bound", 1, uses_tma=True, uses_wgmma=True).id
+        if first == "warp-specialize" and second == "ping-pong-overlap":
+            _ok("overlap-bound: warp-specialize then ping-pong-overlap (both structural)")
+        else:
+            failures += _fail(f"expected warp-specialize then ping-pong-overlap, got {first}/{second}")
+
+    # ---- (9c) fp8 foundation gate: a slow fp8 worst-config with no QGMMA -> fp8 wgmma ----
+    print("[9c] fp8 foundation gate routes a scalar-fallback fp8 worst-config to fp8-wgmma-promote")
+    with tempfile.TemporaryDirectory() as d:
+        c = LeverController(d)
+        cases = [
+            # (label, worst_dtype, uses_wgmma, uses_fp8_wgmma) -> expected lever
+            # fp8 worst-config on scalar, bf16 wgmma infra exists -> promote fp8 to tensor cores
+            (("overlap-bound", "fp8e4m3", True, False), "fp8-wgmma-promote"),
+            (("off-tensor-core", "fp8e4m3", True, False), "fp8-wgmma-promote"),
+            # fp8 already on tensor cores -> gate off, normal routing
+            (("overlap-bound", "fp8e4m3", True, True), "warp-specialize"),
+            # no tensor cores anywhere yet -> establish bf16 wgmma first (don't force fp8 wgmma)
+            (("off-tensor-core", "fp8e4m3", False, False), "wgmma-tensorcore"),
+            # bf16 worst-config -> fp8 gate must not fire
+            (("overlap-bound", "bf16", True, False), "warp-specialize"),
+        ]
+        bad = {}
+        for (label, wd, uw, ufw), want in cases:
+            got = c.select(label, 0, uses_tma=True, uses_wgmma=uw,
+                           uses_fp8_wgmma=ufw, worst_dtype=wd).id
+            if got != want:
+                bad[(label, wd, uw, ufw)] = f"{got}!={want}"
+        if not bad:
+            _ok("fp8 gate fires only for a scalar fp8 worst-config with existing wgmma infra")
+        else:
+            failures += _fail(f"fp8 gate wrong: {bad}")
+
+    # ---- (10) every lever has a reflib hints topic that resolves to a real topic ----
+    print("[10] every lever's get_hints topic resolves (no hardcoded single topic)")
+    from fa3agent.reflib.hints import _resolve_topics  # pure (no files needed)
+    bad_hints = {}
+    for lv in L.CATALOG:
+        if not lv.hints or not _resolve_topics(lv.hints):
+            bad_hints[lv.id] = repr(lv.hints)
+    # distinct techniques must map to distinct hint topics (not all -> "wgmma")
+    distinct = {tuple(_resolve_topics(lv.hints)) for lv in L.CATALOG}
+    if not bad_hints and len(distinct) >= 6:
+        _ok(f"all {len(L.CATALOG)} levers resolve; {len(distinct)} distinct hint topic sets")
+    else:
+        failures += _fail(f"unresolved={bad_hints} distinct_topic_sets={len(distinct)}")
+
     print()
     print("SMOKE: PASS (lever controller)" if failures == 0 else f"SMOKE: FAIL ({failures})")
     return failures

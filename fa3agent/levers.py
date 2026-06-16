@@ -43,6 +43,9 @@ class Lever:
     kind: str
     success: str
     rung: int
+    # reflib.get_hints query for THIS lever's technique (populated from _HINTS_TOPIC below); the
+    # readable pure-PTX model mined from ThunderKittens/DeepGEMM/flashinfer/FlashMLA.
+    hints: str = ""
 
 
 # ---- the catalog (B3 lever list == D2 transform catalog) --------------------------------------
@@ -70,6 +73,23 @@ CATALOG: list = [
         success="long-scoreboard stall share drops and DRAM %peak falls",
         rung=2),
     Lever(
+        id="fp8-wgmma-promote",
+        # Reached via the fp8 FOUNDATION gate in select() (worst config is e4m3 + no QGMMA in SASS),
+        # not by an NCU label -- the synthetic 'fp8-scalar-fallback' tag below never matches a real
+        # classifier verdict, so this lever only fires for a genuinely fp8-on-scalar worst config.
+        bottlenecks=("fp8-scalar-fallback",),
+        focus=("Put the fp8 (e4m3) path on tensor cores: use wgmma.mma_async.sync.aligned with the "
+               ".f32.e4m3.e4m3 variant for QK^T and P*V instead of the scalar FFMA fallback the fp8 "
+               "config is on now.  Accumulate inside the wgmma f32 registers but PROMOTE to a clean "
+               "fp32 accumulator every Nc K-elements (DeepGEMM-style two-level accumulation) to bound "
+               "the ~fp22 wgmma accumulation error; apply the per-tile q/k/v descale factors at the "
+               "promotion boundary.  Keep the bf16 path unchanged."),
+        doc_sections=[("kernel-patterns.md", "DeepGemm FP8 Hopper"),
+                      ("kernel-patterns.md", "Async execution model")],
+        kind=STRUCTURAL,
+        success="fp8 worst-config ratio rises; QGMMA present in SASS; tensor-pipe %active rises",
+        rung=3),
+    Lever(
         id="warp-specialize",
         bottlenecks=("overlap-bound", "sync-bound"),
         focus=("Warp-specialize: a producer warpgroup issues TMA loads, consumer warpgroups run "
@@ -80,6 +100,19 @@ CATALOG: list = [
         kind=STRUCTURAL,
         success="long-scoreboard/wait stall share drops and tensor-pipe %active rises",
         rung=4),
+    Lever(
+        id="ping-pong-overlap",
+        bottlenecks=("overlap-bound",),
+        focus=("Ping-pong two consumer warpgroups so softmax never stalls the tensor core: while "
+               "warpgroup A runs the P*V wgmma for tile i, warpgroup B computes the softmax "
+               "(rowmax/rowsum/exp2 + correction) for tile i+1, then they swap.  Order the hand-off "
+               "with named barriers (bar.sync / mbarrier) and a 2-stage smem ring so the MUFU/exp "
+               "and the wgmma pipelines run concurrently instead of alternating idle."),
+        doc_sections=[("kernel-patterns.md", "Warp specialization"),
+                      ("kernel-patterns.md", "Reduction & online softmax")],
+        kind=STRUCTURAL,
+        success="tensor-pipe %active stays high while MUFU/transcendental runs; SM SOL rises",
+        rung=5),
     Lever(
         id="setmaxnreg-split-registers",
         bottlenecks=("register-spill",),
@@ -93,7 +126,9 @@ CATALOG: list = [
         rung=5),
     Lever(
         id="softmax-log2",
-        bottlenecks=("tensor-core-good", "overlap-bound"),
+        # MICRO lever: only for a healthy tensor-core kernel (NOT overlap-bound -- a log2 softmax
+        # tweak cannot fix tensor cores sitting idle; that needs warp-specialization / TMA overlap).
+        bottlenecks=("tensor-core-good",),
         focus=("Online softmax in the log2 domain (exp2, fold log2(e) into the scale); branchless "
                "predicated rescaling on fully-unmasked K-blocks; overlap the correction with the "
                "P*V GEMM pipeline."),
@@ -165,11 +200,61 @@ CATALOG: list = [
         kind=MICRO,
         success="shared-memory bank-conflict / short-scoreboard stalls drop; SM SOL rises",
         rung=12),
+    Lever(
+        id="vectorized-loads",
+        bottlenecks=("dram-bandwidth-bound", "latency-bound"),
+        focus=("On any non-TMA load path (e.g. the scalar/decode fallback) issue wide 128-bit "
+               "vectorized, coalesced global loads: cast Q/K/V to float4/int4 (or use "
+               "__ldg/ld.global.nc.v4) so each thread moves 16 B and a warp moves one 128 B cache "
+               "line per transaction; align/pad the head-dim leading stride to keep accesses "
+               "contiguous.  A micro fallback when the structural TMA pipeline is not applicable."),
+        doc_sections=[("kernel-patterns.md", "Vectorized loads"),
+                      ("kernel-patterns.md", "Global memory coalescing")],
+        kind=MICRO,
+        success="L2/DRAM sectors-per-request drops toward 4; long-scoreboard stall share falls",
+        rung=13),
+    Lever(
+        id="epilogue-store-microopts",
+        bottlenecks=("tensor-core-good", "mixed/inconclusive"),
+        focus=("Squeeze the O write-out without changing structure: coalesce the register->GMEM "
+               "stores (vectorize to 128-bit, contiguous per warp), use streaming/write-back cache "
+               "hints (__stwt / st.global.cs) on the final O so it does not evict resident K/V from "
+               "L2, and use the wgmma accumulate flag (scale-d=0 on the first k-step) to skip "
+               "explicitly zeroing the accumulator each tile."),
+        doc_sections=[("kernel-patterns.md", "L2 cache control"),
+                      ("kernel-patterns.md", "Global memory coalescing")],
+        kind=MICRO,
+        success="epilogue store stalls drop; L2 hit-rate holds; no extra accumulator-init overhead",
+        rung=14),
 ]
 
 _BY_ID = {lv.id: lv for lv in CATALOG}
 # Deterministic fallback rotation when there is no bottleneck label or all matches are exhausted.
 _FALLBACK_ORDER = [lv.id for lv in sorted(CATALOG, key=lambda l: l.rung)]
+
+# Reference-library hint topic per lever (the reflib.get_hints query string).  Kept beside the
+# catalog so get_hints tracks the ACTIVE lever instead of one hardcoded topic.  Each string is
+# chosen to resolve (via reflib.hints._ALIASES) to the on-topic reflib snippet(s) for the lever's
+# technique; tile-swizzle -> descriptor/swizzle, warp-spec -> warp_specialization + pipeline, etc.
+_HINTS_TOPIC = {
+    "wgmma-tensorcore": "wgmma",
+    "tma-multistage-pipeline": "tma load pipeline",
+    "fp8-wgmma-promote": "wgmma descriptor",
+    "warp-specialize": "warp specialization pipeline",
+    "ping-pong-overlap": "pipeline softmax",
+    "setmaxnreg-split-registers": "warp specialization register",
+    "softmax-log2": "online softmax",
+    "decode-splitkv": "split-kv",
+    "persistent-l2-scheduling": "pipeline",
+    "clusters-tma-multicast": "tma load",
+    "async-store-epilogue": "tma store",
+    "faster-barriers": "mbarrier",
+    "tile-swizzle-tuning": "swizzle descriptor",
+    "vectorized-loads": "ldmatrix",
+    "epilogue-store-microopts": "tma store epilogue",
+}
+for _lv in CATALOG:
+    _lv.hints = _HINTS_TOPIC.get(_lv.id, _lv.id.replace("-", " "))
 
 
 def lever_by_id(lever_id: str) -> Optional[Lever]:
@@ -219,17 +304,53 @@ class LeverController:
         return bool(self.state["levers"].get(lever_id, {}).get("exhausted"))
 
     # ---- selection --------------------------------------------------------------------
-    def select(self, bottleneck_label: Optional[str], step: int) -> Lever:
-        """Pick the lever for the current bottleneck: prefer a matching, non-exhausted lever not yet
-        tried, then by lowest rung; fall back to a deterministic rotation over non-exhausted levers."""
+    def select(self, bottleneck_label: Optional[str], step: int,
+               uses_tma: Optional[bool] = None, uses_wgmma: Optional[bool] = None,
+               uses_fp8_wgmma: Optional[bool] = None, worst_dtype: Optional[str] = None) -> Lever:
+        """Pick the lever for the current bottleneck.
+
+        Order of preference:
+          1. FP8 foundation gate: when the slowest config is fp8 (e4m3) and SASS shows NO fp8 wgmma
+             (QGMMA), that config is on the scalar FFMA fallback -- promote it onto tensor cores
+             first.  Gated on `uses_wgmma is True` so we only extend an existing wgmma+TMA path with
+             the .e4m3 variant (don't force fp8 wgmma on a kernel with no tensor cores at all).
+          2. TMA/tensor-core FOUNDATION gate (B3b): a tensor-core / overlap verdict cannot be fixed
+             without the wgmma+TMA producer that feeds the consumers.  If the kernel still has NO
+             wgmma, land that first; if it has wgmma but NO TMA, land the TMA multistage pipeline
+             first.  `uses_*` are the SASS ground truth for the current champion/seed; a gate fires
+             only when a flag is explicitly False (unknown -> skip) and the lever is not exhausted.
+          3. A matching, non-exhausted lever, preferring STRUCTURAL over micro -- so a structural
+             bottleneck never burns a step on a micro tweak.  Within the structural pool, explore
+             BREADTH-first (least-tried, then lowest rung) so the several structural levers for one
+             bottleneck (e.g. warp-specialize AND ping-pong for overlap-bound) each get a shot
+             instead of hammering the lowest rung until it exhausts.
+          4. A deterministic rotation over non-exhausted levers (no label / all matches exhausted).
+        """
         label = (bottleneck_label or "").strip()
+
+        # (1) fp8 foundation gate: a slow fp8 worst-config with no QGMMA is on the scalar fallback.
+        if (worst_dtype and "fp8" in worst_dtype and uses_fp8_wgmma is False
+                and uses_wgmma is True and not self.is_exhausted("fp8-wgmma-promote")):
+            return _BY_ID["fp8-wgmma-promote"]
+
+        # (2) foundation gate: overlap/off-tensor-core needs wgmma+TMA before anything else helps.
+        if label in ("overlap-bound", "off-tensor-core"):
+            if uses_wgmma is False and not self.is_exhausted("wgmma-tensorcore"):
+                return _BY_ID["wgmma-tensorcore"]
+            if uses_tma is False and not self.is_exhausted("tma-multistage-pipeline"):
+                return _BY_ID["tma-multistage-pipeline"]
+
+        # (3) matching lever, STRUCTURAL-first; explore structural levers breadth-first.
         if label:
             matches = [lv for lv in CATALOG if label in lv.bottlenecks
                        and not self.is_exhausted(lv.id)]
             if matches:
-                matches.sort(key=lambda lv: (self._entry(lv.id)["tried"], lv.rung))
-                return matches[0]
-        # fallback: rotate through non-exhausted levers deterministically by step
+                structural = [lv for lv in matches if lv.kind == STRUCTURAL]
+                pool = structural or matches
+                pool.sort(key=lambda lv: (self._entry(lv.id)["tried"], lv.rung))
+                return pool[0]
+
+        # (4) fallback: rotate through non-exhausted levers deterministically by step
         open_ids = [i for i in _FALLBACK_ORDER if not self.is_exhausted(i)]
         if not open_ids:
             open_ids = _FALLBACK_ORDER  # everything exhausted -> reuse rotation (degraded)

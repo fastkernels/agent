@@ -142,6 +142,20 @@ def _label_of(profile: Optional[dict]) -> str:
     return km.get("_bottleneck_label") or profile.get("bottleneck", "") or ""
 
 
+def _sass_flags(rec: Optional[dict]) -> tuple[Optional[bool], Optional[bool], Optional[bool]]:
+    """(uses_tma, uses_wgmma, uses_fp8_wgmma) from a step record's SASS summary, or all-None.
+
+    Feeds the lever selector's foundation gates (B3b): an overlap/off-tensor-core bottleneck on a
+    kernel that has wgmma but NO TMA should land the TMA pipeline before warp-specialization; a slow
+    fp8 worst-config with wgmma but NO fp8 wgmma (QGMMA) should land fp8 tensor cores first.
+    Unknown (no SASS) -> all None so the gates stay conservative (they fire only on explicit False)."""
+    s = rec.get("sass") if isinstance(rec, dict) else None
+    if not isinstance(s, dict) or not s.get("ok"):
+        return None, None, None
+    summ = s.get("summary") or {}
+    return summ.get("uses_tma"), summ.get("uses_wgmma"), summ.get("uses_fp8_wgmma")
+
+
 def _looks_like_mem_bug(ev) -> bool:
     """True when a correctness failure smells like a memory bug worth a sanitizer pass."""
     if getattr(ev, "error", ""):
@@ -290,10 +304,13 @@ class Orchestrator:
         else:
             bottleneck = (prev.get("profile", {}) or {}).get("bottleneck", "") if prev else ""
             dq = _doc_query(focus, bottleneck)
+            # Reference-lib hints for THIS step's lever/technique (NOT a hardcoded topic): the
+            # readable pure-PTX model for what the brain is being steered to do this step.
+            hints_topic = (lever.hints if lever else "") or "wgmma"
             kh = ""
             try:
                 if self.comp.get("get_hints"):
-                    kh = self.comp["get_hints"]("wgmma bf16") or ""
+                    kh = self.comp["get_hints"](hints_topic) or ""
             except Exception:
                 pass
             # Proactively surface NVIDIA docs so they reach the brain even on steps where it
@@ -469,6 +486,11 @@ class Orchestrator:
             self._log(f"[ncu] profiling worst config '{wcfg.name}' on gpu{gpu} (out-of-process)...")
             with self.pool.exclusive(gpu):
                 profile = self._profile_subprocess(so_path, ns, wcfg.name, gpu, uses_wgmma=uses_wgmma)
+            # Tag the profile with the worst config's identity/dtype so the lever selector's fp8
+            # foundation gate can see the min-ratio config is fp8 (e4m3) without re-deriving it.
+            if isinstance(profile, dict):
+                profile["worst_config"] = wcfg.name
+                profile["worst_dtype"] = wcfg.dtype
             self._log(f"[ncu] bottleneck: {(profile or {}).get('bottleneck','(none)')[:140]}")
 
         # NOTE: the faithful vLLM gates (in-situ A/B, then full decode-equality) are run at the
@@ -500,15 +522,25 @@ class Orchestrator:
                 self._log(f"[branch] rung 0 refactor (seed {branch.get('seed_cid')})")
             else:
                 label = _label_of((prev or {}).get("profile")) or _label_of(best.get("profile"))
-                lever = self._levers.select(label, step)
+                # B3b: SASS of the branch tip (prev) if known, else the seed/champion (best).
+                src = prev if (isinstance(prev, dict) and prev.get("sass")) else best
+                uses_tma, uses_wgmma, uses_fp8_wgmma = _sass_flags(src)
+                worst_dtype = (((src or {}).get("profile")) or {}).get("worst_dtype")
+                lever = self._levers.select(label, step, uses_tma=uses_tma, uses_wgmma=uses_wgmma,
+                                            uses_fp8_wgmma=uses_fp8_wgmma, worst_dtype=worst_dtype)
                 lever_id = lever.id
                 self._log(f"[branch] rung {rung} D2 transform: bottleneck={label or '(none)'} "
                           f"-> {lever.id} ({lever.kind})")
                 focus = f"{lever.focus}  [NCU success criterion: {lever.success}]"
         elif best is not None:
             # B3: pick the lever from the CHAMPION's bottleneck label (not step%5); skip exhausted.
+            # B3b: gate on the champion's SASS (wgmma+TMA presence) so an overlap-bound kernel that
+            # still lacks TMA lands the TMA pipeline before warp-specialization.
             label = _label_of(best.get("profile"))
-            lever = self._levers.select(label, step)
+            uses_tma, uses_wgmma, uses_fp8_wgmma = _sass_flags(best)
+            worst_dtype = (best.get("profile") or {}).get("worst_dtype")
+            lever = self._levers.select(label, step, uses_tma=uses_tma, uses_wgmma=uses_wgmma,
+                                        uses_fp8_wgmma=uses_fp8_wgmma, worst_dtype=worst_dtype)
             lever_id = lever.id
             self._log(f"[lever] bottleneck={label or '(none)'} -> {lever.id} ({lever.kind})")
             focus = f"{lever.focus}  [NCU success criterion: {lever.success}]"

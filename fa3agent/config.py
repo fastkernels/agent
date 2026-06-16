@@ -134,12 +134,13 @@ DELIVERABLE_NAMESPACE = "_vllm_fa3_C"  # used for the final swap into vLLM
 # Use the FULL model id, not the alias.  (settings.json also sets ANTHROPIC_MODEL=claude-opus-4-8.)
 HEADLESS_MODEL = "claude-opus-4-8"
 # Effort level passed to `claude --effort <level>` (low|medium|high|xhigh|ultracode).
-# Default xhigh: the deepest single-agent reasoning for hard kernel codegen (worth the per-step
-# cost on these structural rewrites), while the Python orchestrator (NOT the brain) owns the
-# loop/eval/multi-GPU/checkpoint and the "one candidate per step" contract.  Drop to high for a
-# lower per-step cost on long runs; use ultracode only when you want the brain to do in-step
-# multi-variant search (costlier, the brain spawns its own workflows).
-HEADLESS_EFFORT = "xhigh"
+# Default high: strong single-agent reasoning for kernel codegen at a markedly lower per-step cost
+# than xhigh (xhigh roughly doubled wall-clock/step on these runs for little extra signal), while
+# the Python orchestrator (NOT the brain) owns the loop/eval/multi-GPU/checkpoint and the "one
+# candidate per step" contract.  Bump to xhigh for the deepest reasoning on a hard structural
+# rewrite; use ultracode only when you want the brain to do in-step multi-variant search (costlier,
+# the brain spawns its own workflows).
+HEADLESS_EFFORT = "high"
 # Carry the Claude session across refine steps via `claude --resume`?  DEFAULT FALSE.
 # `--resume` replays the ENTIRE prior conversation as the new request; on the Snowflake-Cortex
 # relay that oversized payload fails with retryable "unknown" errors (observed: step 0 fresh

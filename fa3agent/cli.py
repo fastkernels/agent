@@ -190,7 +190,7 @@ def main(argv=None):
     r.add_argument("--model", default=C.HEADLESS_MODEL, help="full model id for the headless brain")
     r.add_argument("--effort", default=C.HEADLESS_EFFORT,
                    choices=["low", "medium", "high", "xhigh", "ultracode"],
-                   help="reasoning effort for the headless brain (default xhigh)")
+                   help="reasoning effort for the headless brain (default high)")
     r.add_argument("--run-id", default=None)
     r.add_argument("--resume", action="store_true")
     r.add_argument("--decode-tokens", type=int, default=100)
