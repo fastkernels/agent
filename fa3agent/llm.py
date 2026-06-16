@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import shutil
 import threading
@@ -33,14 +34,95 @@ def claude_available() -> bool:
     return shutil.which("claude") is not None
 
 
+# --------------------------------------------------------------------------------------
+# Run isolation (Workstream F): keep the durable checkpoint archive out of the brain's reach,
+# and give the brain an isolated per-run Claude config dir (no cross-run chat history).
+# --------------------------------------------------------------------------------------
+def _norm(p: str) -> str:
+    return os.path.normpath(os.path.abspath(p))
+
+
+def _is_under_checkpoint_root(path: str) -> bool:
+    """True if `path` is the checkpoint archive root or anything under it (F4 guard)."""
+    if not path:
+        return False
+    root = _norm(C.CHECKPOINT_ROOT)
+    p = _norm(path)
+    return p == root or p.startswith(root + os.sep)
+
+
+def _checkpoint_leak(cwd: str, allowed_dirs: Optional[list[str]], prompt: str) -> Optional[str]:
+    """Return a violation string if the brain would be handed a CHECKPOINT_ROOT path via its
+    cwd, an --add-dir, or the prompt text; else None.  Separation safety net (F4): by construction
+    the orchestrator never passes such a path, so this should never fire in normal operation."""
+    if _is_under_checkpoint_root(cwd):
+        return f"cwd is under CHECKPOINT_ROOT ({cwd})"
+    for d in allowed_dirs or []:
+        if _is_under_checkpoint_root(d):
+            return f"allowed_dir is under CHECKPOINT_ROOT ({d})"
+    if _norm(C.CHECKPOINT_ROOT) in (prompt or ""):
+        return "prompt references the CHECKPOINT_ROOT path"
+    return None
+
+
+def _default_claude_home() -> str:
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+
+
+def _repo_project_slug() -> str:
+    """Claude Code names per-project transcript dirs by replacing path separators/specials with
+    '-' (e.g. /home/yak -> -home-yak).  The brain always runs in cwd=REPO_ROOT, so this is its
+    project slug."""
+    return re.sub(r"[^A-Za-z0-9]", "-", C.REPO_ROOT)
+
+
+def seed_brain_claude_config(config_dir: str) -> None:
+    """Create the brain's isolated per-run Claude config dir, seeded with SETTINGS ONLY (no chat
+    history).  Auth on this relay is via the inherited ANTHROPIC_AUTH_TOKEN env (the subprocess
+    inherits os.environ), so no credential seeding is needed; we copy settings.json
+    (permissions/model/effort) when present.  projects/ / history.jsonl / sessions/ are deliberately
+    NOT copied, so the brain starts with zero prior-run chats."""
+    try:
+        os.makedirs(config_dir, exist_ok=True)
+        for fn in ("settings.json",):
+            src = os.path.join(_default_claude_home(), fn)
+            if os.path.isfile(src):
+                shutil.copyfile(src, os.path.join(config_dir, fn))
+    except OSError:
+        pass
+
+
+def wipe_default_brain_transcripts() -> None:
+    """Fallback for a `claude` CLI that ignores CLAUDE_CONFIG_DIR: delete ONLY the brain's own
+    per-project transcript dir under the DEFAULT ~/.claude (slug derived from the brain cwd =
+    REPO_ROOT), so a fresh run can't read prior-run chats.  Scoped to the brain's slug -- never the
+    user's other projects.  Gated by config.WIPE_DEFAULT_BRAIN_TRANSCRIPTS."""
+    if not getattr(C, "WIPE_DEFAULT_BRAIN_TRANSCRIPTS", True):
+        return
+    slug = _repo_project_slug()
+    if not slug or slug.strip("-") == "":
+        return
+    proj = os.path.join(_default_claude_home(), "projects", slug)
+    try:
+        if os.path.isdir(proj):
+            shutil.rmtree(proj, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def run_claude(prompt: str, cwd: str, model: Optional[str] = None, effort: Optional[str] = None,
                session_id: Optional[str] = None, timeout: int = 5400,
                allowed_dirs: Optional[list[str]] = None,
+               env_extra: Optional[dict] = None,
                stream_log: Optional[str] = None) -> LLMResult:
     """Spawn `claude -p` headless, parse the JSON envelope, return text + session id.
 
     The prompt instructs the brain to WRITE the candidate .cu to a known path; the driver
     builds/evaluates it (the brain must NOT run the eval itself).
+
+    ``allowed_dirs`` are passed to the brain as ``--add-dir`` (read access beyond its cwd, e.g. the
+    live workdir holding MEMORY.md / rewrite_journal -- E3).  ``env_extra`` is merged into the
+    subprocess environment (e.g. CLAUDE_CONFIG_DIR for the per-run, history-isolated config -- F5).
 
     If ``stream_log`` is given, the brain runs with ``--output-format stream-json`` and the
     transcript is COALESCED to one entry per complete assistant/user/result event (tailable, no
@@ -48,6 +130,12 @@ def run_claude(prompt: str, cwd: str, model: Optional[str] = None, effort: Optio
     while the relay is silent so a slow generation does not look frozen; a clean failure is retried
     once with a fresh session.  Otherwise a single-shot ``--output-format json`` call is captured.
     """
+    # F4 guard: the durable archive must NEVER be handed to the brain (separation, not a sandbox).
+    # Enforced FIRST -- before the stub / availability checks -- so it always holds.
+    leak = _checkpoint_leak(cwd, allowed_dirs, prompt)
+    if leak is not None:
+        return LLMResult(ok=False, error=f"refusing to run brain with CHECKPOINT_ROOT exposure: {leak}")
+
     # FA3_STUB_LLM: skip the real Claude call (fast, deterministic machinery test). The
     # orchestrator then falls back to seeding from seed_kernel.cu / reusing the champion.
     if os.environ.get("FA3_STUB_LLM"):
@@ -55,11 +143,15 @@ def run_claude(prompt: str, cwd: str, model: Optional[str] = None, effort: Optio
     if not claude_available():
         return LLMResult(ok=False, error="claude CLI not found on PATH")
 
+    sub_env = dict(os.environ, **env_extra) if env_extra else None
+
     model = model or C.HEADLESS_MODEL
     effort = effort if effort is not None else C.HEADLESS_EFFORT
     base = ["claude", "-p", prompt, "--dangerously-skip-permissions", "--model", model]
     if effort:
         base += ["--effort", effort]
+    for d in allowed_dirs or []:
+        base += ["--add-dir", d]
     resume_args = ["--resume", session_id] if session_id else []
 
     if stream_log:
@@ -70,7 +162,8 @@ def run_claude(prompt: str, cwd: str, model: Optional[str] = None, effort: Optio
         # Liveness instead comes from a heartbeat line _run_streamed writes while idle; a true hang
         # is bounded by the wall-clock `timeout`.
         stream_extra = ["--output-format", "stream-json", "--verbose"]
-        res = _run_streamed(base + resume_args + stream_extra, cwd, timeout, stream_log, session_id)
+        res = _run_streamed(base + resume_args + stream_extra, cwd, timeout, stream_log, session_id,
+                            env=sub_env)
         # Retry a CLEAN failure (nonzero exit / error result -- typically a dropped relay
         # connection) once with a FRESH session.  Do NOT retry a wall-clock timeout: it already ran
         # the full budget, so the orchestrator should fall back to the champion instead.
@@ -78,12 +171,14 @@ def run_claude(prompt: str, cwd: str, model: Optional[str] = None, effort: Optio
         attempt = 1
         while (not res.ok) and (not res.timed_out) and attempt <= retries:
             attempt += 1
-            res = _run_streamed(base + stream_extra, cwd, timeout, stream_log, None, attempt=attempt)
+            res = _run_streamed(base + stream_extra, cwd, timeout, stream_log, None, attempt=attempt,
+                                env=sub_env)
         return res
 
     cmd = base + resume_args + ["--output-format", "json"]
     try:
-        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                              env=sub_env)
     except subprocess.TimeoutExpired:
         return LLMResult(ok=False, error=f"claude timed out after {timeout}s")
     except Exception as e:  # noqa
@@ -191,7 +286,8 @@ def _render_stream_event(obj: dict) -> Optional[str]:
 
 
 def _run_streamed(cmd: list, cwd: str, timeout: int, stream_log: str,
-                  session_id: Optional[str], attempt: int = 1) -> LLMResult:
+                  session_id: Optional[str], attempt: int = 1,
+                  env: Optional[dict] = None) -> LLMResult:
     """Run claude with stream-json, tee a CONSOLIDATED transcript to ``stream_log`` (one entry per
     complete event), and parse the final ``type==result`` event.
 
@@ -207,7 +303,7 @@ def _run_streamed(cmd: list, cwd: str, timeout: int, stream_log: str,
         pass
     try:
         proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT, text=True, bufsize=1)
+                                 stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
     except Exception as e:  # noqa
         return LLMResult(ok=False, error=f"claude spawn failed: {e!r}")
 

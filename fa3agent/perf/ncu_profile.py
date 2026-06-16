@@ -294,13 +294,20 @@ def _classify_perm_error(text: str) -> Optional[str]:
 
 
 # --- 4. bottleneck classification (decision tree from .research/ncu-skill.md) ---
-def _classify(action) -> tuple[str, str, str, str, list[str]]:
+def _classify(action, uses_wgmma: Optional[bool] = None) -> tuple[str, str, str, str, list[str]]:
     """Return (label, bottleneck, optimization, plan, evidence_lines).
 
+    `uses_wgmma` is the SASS-derived ground truth (HGMMA/QGMMA present), threaded in from
+    sass.analyze; None when unknown.  It both (a) enables the `overlap-bound` verdict (wgmma IS
+    present but the math pipe sits idle behind dependencies -> warp-specialize) and (b) GATES the
+    off-tensor-core verdict so it no longer misfires when wgmma is actually present but NCU happens
+    to report ~0 tensor activity (wrong-kernel / metric drift).
+
     Thresholds + cross-dimension logic follow .research/ncu-skill.md section 3:
+      wgmma present but stalled on scoreboard/wait, pipe not saturated -> overlap-bound;
       DRAM%peak high(>=60) -> BW-bound;
       DRAM%<10 & long_scoreboard>40% of stalls -> latency-bound;
-      tensor pipe ~0 & fp32/fma high -> off-tensor-core;
+      tensor pipe ~0 & fp32/fma high & NO wgmma -> off-tensor-core;
       tensor>50% -> good;
       register spill (local ld/st > 0) -> spill.
     """
@@ -322,22 +329,40 @@ def _classify(action) -> tuple[str, str, str, str, list[str]]:
     shares = U.stall_shares(action)
     lsb = shares.get("long_scoreboard", 0.0)
     ssb = shares.get("short_scoreboard", 0.0)
+    wait = shares.get("wait", 0.0)
     barrier = shares.get("barrier", 0.0) + shares.get("membar", 0.0)
     top_stall = max(shares.items(), key=lambda kv: kv[1], default=("none", 0.0))
 
+    # Is the tensor pipe genuinely in use?  Prefer SASS ground truth (HGMMA count); fall back to a
+    # non-trivial measured tensor-pipe activity.  Avoids the NCU "~0 tensor%" misread on wgmma kernels.
+    tensor_present = (uses_wgmma is True) or (tensor >= 5.0)
+
     ev = [
         f"SM SOL {_fmt(sm_sol)}% | DRAM %peak {_fmt(dram_pct)}%",
-        f"tensor-pipe active {_fmt(tensor, 2)}% | FMA pipe {_fmt(fma, 2)}%",
+        f"tensor-pipe active {_fmt(tensor, 2)}% | FMA pipe {_fmt(fma, 2)}%"
+        + (f" | SASS uses_wgmma={uses_wgmma}" if uses_wgmma is not None else ""),
         f"achieved occ {_fmt(occ)}%"
         + (f" | waves/SM {_fmt(waves, 3)}" if waves is not None else ""),
         f"top stall: {top_stall[0]} {_fmt(top_stall[1])}% "
-        f"(long_sb {_fmt(lsb)}%, short_sb {_fmt(ssb)}%, barrier {_fmt(barrier)}%)",
+        f"(long_sb {_fmt(lsb)}%, short_sb {_fmt(ssb)}%, wait {_fmt(wait)}%, barrier {_fmt(barrier)}%)",
     ]
     if spill_ld or spill_st:
         ev.append(f"register spill: local ld {_fmt(spill_ld, 0)} / st {_fmt(spill_st, 0)}")
 
-    # --- decision tree (ordered: spill first = always-bad, then SOL classes) ---
-    if (spill_ld or spill_st) and (lsb > 30 or sm_sol < 30):
+    # --- decision tree (ordered) ---
+    # overlap-bound FIRST (ranked above spill): the FA3-defining verdict -- the tensor cores ARE in
+    # use but stall behind long-latency dependencies (scoreboard/wait) and the pipe is far from
+    # saturated, i.e. the softmax/correction does NOT overlap the GEMMs -> warp-specialize.
+    if (tensor_present and tensor < 50.0 and dram_pct < 60.0 and (lsb + wait) > 40.0):
+        label = "overlap-bound"
+        bn = (f"Math/memory not overlapped: tensor cores in use (pipe {_fmt(tensor, 2)}% active, "
+              f"uses_wgmma={uses_wgmma}) but stalled {_fmt(lsb + wait)}% on scoreboard/wait, "
+              f"SM SOL {_fmt(sm_sol)}%, occ {_fmt(occ)}%.")
+        opt = ("Warp-specialize: split a producer warpgroup (TMA/cp.async loads) from consumer "
+               "wgmma warpgroups so softmax/correction overlaps the GEMM pipeline instead of serializing.")
+        plan = ("Restructure into producer/consumer warpgroups with mbarrier double-buffering + "
+                "setmaxnreg; recheck long-scoreboard/wait stall share drops and tensor-pipe %active rises.")
+    elif (spill_ld or spill_st) and (lsb > 30 or sm_sol < 30):
         label = "register-spill"
         bn = (f"Register spill: local ld {_fmt(spill_ld, 0)}/st {_fmt(spill_st, 0)} >0, "
               f"long-scoreboard {_fmt(lsb)}% of stalls, SM SOL {_fmt(sm_sol)}%.")
@@ -361,10 +386,13 @@ def _classify(action) -> tuple[str, str, str, str, list[str]]:
                "raise occupancy, ensure coalesced 128B accesses.")
         plan = ("Add a multi-stage async copy pipeline for K/V and increase warps/CTA; "
                 "recheck long-scoreboard share and occupancy.")
-    elif tensor < 1.0 and fma > 20:
+    elif tensor < 1.0 and fma > 20 and uses_wgmma is not True:
+        # Off tensor cores -- but ONLY when SASS does not already show wgmma (uses_wgmma is not
+        # True).  When wgmma IS present this branch was misfiring on an NCU ~0-tensor% misread; such
+        # kernels now fall to overlap-bound (above) or mixed, never "go use tensor cores".
         label = "off-tensor-core"
         bn = (f"Compute off tensor cores: tensor-pipe {_fmt(tensor, 2)}% vs FMA pipe "
-              f"{_fmt(fma)}%, SM SOL {_fmt(sm_sol)}%.")
+              f"{_fmt(fma)}%, SM SOL {_fmt(sm_sol)}% (SASS uses_wgmma={uses_wgmma}).")
         opt = ("Move the QK^T and PV matmuls onto Hopper tensor cores via wgmma instead of "
                "FMA/CUDA-core loops.")
         plan = ("Rewrite the two inner GEMMs as wgmma.mma_async with smem operand tiles; "
@@ -420,7 +448,7 @@ def _ranked(action, ev: list[str]) -> list[str]:
 # --- top-level entry -----------------------------------------------------------
 @logged("ncu_profile")
 def profile(so_path: str, namespace: str, cfg, gpu_id: int,
-            run_dir: str) -> common.ProfileFeedback:
+            run_dir: str, uses_wgmma: Optional[bool] = None) -> common.ProfileFeedback:
     os.makedirs(run_dir, exist_ok=True)
     fb = common.ProfileFeedback(config=getattr(cfg, "name", str(cfg)))
 
@@ -480,11 +508,13 @@ def profile(so_path: str, namespace: str, cfg, gpu_id: int,
     except Exception:
         pass
 
-    label, bn, opt, plan, ev = _classify(action)
+    label, bn, opt, plan, ev = _classify(action, uses_wgmma=uses_wgmma)
     key_metrics = dict(U.resolve_subset(action))
     key_metrics["_bottleneck_label"] = label
     key_metrics["_kernel"] = kname
     key_metrics["_ncu_set"] = used
+    if uses_wgmma is not None:
+        key_metrics["_uses_wgmma_sass"] = uses_wgmma
     dur = U.metric_or_none(action, "gpu__time_duration.sum")
     if dur is not None:
         key_metrics["gpu__time_duration.sum_ns"] = dur

@@ -1,11 +1,13 @@
 """Per-step checkpointing + resume.
 
-A run lives entirely under CHECKPOINT_ROOT/<run_id>/ so it is self-contained and resumable
-after an interruption.  candidates.jsonl is the append-only evolution DAG + lineage (one
-StepRecord per line).  After every step the orchestrator calls append_step(); resume reads
-the latest completed step and the current best candidate.
+A run does its LIVE work under WORK_ROOT/<run_id>/ (scratch, the brain's working set) and is
+MIRRORED into CHECKPOINT_ROOT/<run_id>/ (the durable, user-facing archive) after every step.  A
+FRESH run wipes WORK_ROOT so the brain can only see the current run; a RESUME restores the live
+workdir from the archive first.  candidates.jsonl is the append-only evolution DAG + lineage (one
+StepRecord per line).  After every step the orchestrator calls append_step() then
+mirror_to_archive(); resume reads the latest completed step and the current best candidate.
 
-Layout:
+Layout (identical under WORK_ROOT live + CHECKPOINT_ROOT archive):
   <run_id>/
     meta.json                 run config (config set, model, max_steps, ...)
     candidates.jsonl          one StepRecord per step (the lineage)
@@ -15,6 +17,8 @@ Layout:
     knowledge/                typed knowledge store (notes)
     plots/evolution.png       AVO-style evolution plot
     best.cu                   current champion source
+    MEMORY.md / branches.json / lever_state.json / rewrite_journal.md   cross-step memory + branch state
+    .claude/                  brain's isolated per-run Claude config (NOT mirrored to the archive)
 """
 from __future__ import annotations
 
@@ -29,6 +33,12 @@ from .common import StepRecord
 
 
 def _run_dir(run_id: str) -> str:
+    """LIVE run dir (scratch workdir under WORK_ROOT)."""
+    return os.path.join(C.WORK_ROOT, run_id)
+
+
+def _archive_dir(run_id: str) -> str:
+    """DURABLE archive run dir (under CHECKPOINT_ROOT)."""
     return os.path.join(C.CHECKPOINT_ROOT, run_id)
 
 
@@ -47,7 +57,25 @@ def paths(run_id: str) -> dict:
     )
 
 
-def init_run(run_id: str, meta: dict) -> dict:
+def init_run(run_id: str, meta: dict, resume: bool = False) -> dict:
+    """Prepare the LIVE workdir for a run.
+
+    FRESH run (resume=False): wipe the ENTIRE WORK_ROOT (all prior runs' live dirs are already
+    mirrored to the archive) so the brain's working set holds ONLY the current run, then recreate.
+    RESUME (resume=True): restore WORK_ROOT/<run_id> from the durable archive if the live copy is
+    missing (e.g. a cold resume after a wipe / on a fresh box), and NEVER wipe.
+    """
+    work = _run_dir(run_id)
+    archive = _archive_dir(run_id)
+    if resume:
+        if not os.path.exists(work) and os.path.isdir(archive):
+            try:
+                shutil.copytree(archive, work)
+            except Exception:  # noqa: BLE001  (best-effort restore; init recreates dirs below)
+                pass
+    else:
+        shutil.rmtree(C.WORK_ROOT, ignore_errors=True)
+
     p = paths(run_id)
     for d in ("run", "candidates", "builds", "reports", "knowledge", "plots"):
         os.makedirs(p[d], exist_ok=True)
@@ -62,6 +90,57 @@ def init_run(run_id: str, meta: dict) -> dict:
     with open(p["meta"], "w") as f:
         json.dump(meta, f, indent=2)
     return p
+
+
+# --------------------------------------------------------------------------------------
+# Mirror the live workdir -> durable archive (F3).  Incremental: only new/changed files are
+# copied, so per-step mirroring stays cheap.  The brain's per-run Claude config (.claude) and
+# volatile ncu scratch are excluded; built .so files are included unless ARCHIVE_INCLUDE_SO is off.
+# --------------------------------------------------------------------------------------
+_MIRROR_EXCLUDE_DIRS = {".claude", "ncu_home"}
+
+
+def _is_excluded_dir(name: str) -> bool:
+    return name in _MIRROR_EXCLUDE_DIRS or name.startswith("ncu_tmp")
+
+
+def _needs_copy(src: str, dst: str) -> bool:
+    if not os.path.exists(dst):
+        return True
+    try:
+        ss, ds = os.stat(src), os.stat(dst)
+    except OSError:
+        return True
+    return ss.st_size != ds.st_size or ss.st_mtime > ds.st_mtime + 1e-6
+
+
+def mirror_to_archive(run_id: str, include_so: Optional[bool] = None) -> None:
+    """Incrementally copy WORK_ROOT/<run_id> -> CHECKPOINT_ROOT/<run_id> (durable, up-to-date)."""
+    if include_so is None:
+        include_so = C.ARCHIVE_INCLUDE_SO
+    src = _run_dir(run_id)
+    dst = _archive_dir(run_id)
+    if not os.path.isdir(src):
+        return
+    try:
+        os.makedirs(dst, exist_ok=True)
+    except OSError:
+        return
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if not _is_excluded_dir(d)]
+        rel = os.path.relpath(root, src)
+        tgt_root = dst if rel == "." else os.path.join(dst, rel)
+        for fn in files:
+            if not include_so and fn.endswith(".so"):
+                continue
+            s = os.path.join(root, fn)
+            d = os.path.join(tgt_root, fn)
+            try:
+                if _needs_copy(s, d):
+                    os.makedirs(tgt_root, exist_ok=True)
+                    shutil.copy2(s, d)
+            except OSError:
+                pass
 
 
 def save_candidate_cu(run_id: str, cid: str, source: str) -> str:

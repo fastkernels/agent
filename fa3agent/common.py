@@ -111,6 +111,8 @@ class StepRecord:
     profile: Optional[dict] = None
     sass: Optional[dict] = None
     knowledge_note: Optional[str] = None
+    focus: Optional[str] = None        # the steer/lever applied this step (E1 causal lessons)
+    lever_id: Optional[str] = None     # id of the B3 lever applied this step (outcome tracking)
     session_id: Optional[str] = None   # Claude headless session for resume continuity
     is_best: bool = False
     timestamp: float = field(default_factory=now)

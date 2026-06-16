@@ -196,6 +196,43 @@ def _is_allowed(line_low: str) -> bool:
     return any(a.lower() in line_low for a in C.ALLOWED_LINK_SUBSTR)
 
 
+# CUDA driver / runtime symbols that legitimately CONTAIN a forbidden substring but are NOT a
+# forbidden library.  The TMA driver API (cuTensorMapEncodeTiled / cuTensorMapEncodeIm2col /
+# cuTensorMapReplaceAddress) contains "cute" once lowercased -- and TMA is exactly the Hopper
+# feature we WANT the brain to adopt -- so it must never be flagged as the CuTe namespace.
+_DRIVER_SYMBOL_ALLOW_PREFIX = ("cuTensorMap",)
+
+
+def _symbol_name(nm_line: str) -> str:
+    """Extract the symbol-name column from one `nm -D` line.
+
+    `nm -D` lines look like '<addr> <type> <name>' or '<spaces>U <name>' (undefined import);
+    the symbol name is the final whitespace-delimited token (mangled, no spaces, since we do
+    not pass -C/--demangle).  Returns '' for header/blank lines.
+    """
+    parts = nm_line.split()
+    return parts[-1] if parts else ""
+
+
+def _forbidden_symbol_match(name: str, bad: str) -> bool:
+    """Symbol-aware match: is dynamic symbol/dep `name` a REAL use of forbidden lib `bad`?
+
+    Avoids the substring false-positive where a CUDA driver symbol (cuTensorMapEncodeTiled)
+    or an ordinary identifier ('execute') trips the bare substring 'cute'.  For 'cute' we
+    require the actual CuTe namespace: 'cute::' (demangled) or the Itanium-mangled namespace
+    component '4cute' (e.g. _ZN4cute...) or the shared lib 'libcute'.  Other tokens
+    (cutlass/cublas/cudnn/flashinfer/triton/nvrtc) are unambiguous substrings.
+    """
+    # Never flag allowlisted CUDA driver symbols (e.g. the TMA encoders).
+    if any(name.startswith(p) for p in _DRIVER_SYMBOL_ALLOW_PREFIX):
+        return False
+    low = name.lower()
+    badl = bad.lower()
+    if badl == "cute":
+        return ("cute::" in low) or ("4cute" in low) or ("libcute" in low)
+    return badl in low
+
+
 def _scan_binary(so_path: str, violations: list[str]) -> None:
     if not os.path.isfile(so_path):
         violations.append(f"binary not found: {so_path}")
@@ -203,13 +240,14 @@ def _scan_binary(so_path: str, violations: list[str]) -> None:
 
     seen: set[str] = set()
 
-    # ldd: shared-object dependency names.
+    # ldd: shared-object dependency names.  Match against the whole line (paths/soname), but
+    # symbol-aware so '.../execute/...' or a TMA-using driver dep is not a false CuTe hit.
     ok_ldd, ldd_out = _run(["ldd", so_path])
     if ok_ldd:
         for line in ldd_out.splitlines():
             low = line.lower()
             for bad in C.FORBIDDEN_DYNAMIC_SUBSTR:
-                if bad.lower() in low and not _is_allowed(low):
+                if _forbidden_symbol_match(line, bad) and not _is_allowed(low):
                     key = f"ldd:{bad}"
                     if key not in seen:
                         seen.add(key)
@@ -217,14 +255,17 @@ def _scan_binary(so_path: str, violations: list[str]) -> None:
                             f"forbidden shared-lib dep (matches {bad!r}): {line.strip()[:120]}")
                     break
 
-    # nm -D: dynamic (imported/exported) symbols.
+    # nm -D: dynamic (imported/exported) symbols.  Match ONLY the symbol-name column so the
+    # address/type columns can't cause spurious hits, and use the symbol-aware matcher.
     ok_nm, nm_out = _run(["nm", "-D", so_path])
     if ok_nm:
         for line in nm_out.splitlines():
-            low = line.lower()
-            # Only look at the symbol name portion; ignore address/type columns.
+            sym = _symbol_name(line)
+            if not sym:
+                continue
+            low = sym.lower()
             for bad in C.FORBIDDEN_DYNAMIC_SUBSTR:
-                if bad.lower() in low and not _is_allowed(low):
+                if _forbidden_symbol_match(sym, bad) and not _is_allowed(low):
                     key = f"nm:{bad}"
                     if key not in seen:
                         seen.add(key)

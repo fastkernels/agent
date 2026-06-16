@@ -220,5 +220,6 @@ __marimo__/
 .DS_Store
 # fa3agent runtime artifacts
 .smoketest/
+.fa3_work/
 fa3agent/knowledge/notes/
 *.ncu-rep

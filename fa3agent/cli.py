@@ -86,7 +86,7 @@ def cmd_run(a):
         orch = Orchestrator(run_id, config_set=a.configs, max_steps=a.max_steps, model=a.model,
                             effort=a.effort,
                             decode_tokens=a.decode_tokens, do_decode_equiv=not a.no_decode_equiv,
-                            profile_enabled=not a.no_profile)
+                            profile_enabled=not a.no_profile, resume=a.resume)
         result = orch.run()
         print("RESULT:", result)
         print("checkpoint:", os.path.join(C.CHECKPOINT_ROOT, run_id))
@@ -184,7 +184,7 @@ def main(argv=None):
     r.add_argument("--model", default=C.HEADLESS_MODEL, help="full model id for the headless brain")
     r.add_argument("--effort", default=C.HEADLESS_EFFORT,
                    choices=["low", "medium", "high", "xhigh", "ultracode"],
-                   help="reasoning effort for the headless brain (default high)")
+                   help="reasoning effort for the headless brain (default xhigh)")
     r.add_argument("--run-id", default=None)
     r.add_argument("--resume", action="store_true")
     r.add_argument("--decode-tokens", type=int, default=100)

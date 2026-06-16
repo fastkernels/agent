@@ -32,13 +32,37 @@ REPO_ROOT = os.environ.get("FA3_REPO_ROOT") or os.path.dirname(PKG_DIR)
 RESEARCH_DIR = os.path.join(REPO_ROOT, ".research")
 REFERENCE_DIR = os.path.join(REPO_ROOT, "reference")
 
-# Checkpoints live OUTSIDE the repo (spec requirement).  The default is this-cluster
-# convention; override with FA3_CHECKPOINT_ROOT on another machine.
+# DURABLE checkpoint archive -- lives OUTSIDE the repo (spec requirement).  The default is
+# this-cluster convention; override with FA3_CHECKPOINT_ROOT on another machine.  This is the
+# user-facing, mirrored copy of a run (what `cli.py` reads); the BRAIN never receives a path
+# under here (run isolation, Workstream F).
 CHECKPOINT_ROOT = os.environ.get("FA3_CHECKPOINT_ROOT") or "/code/users/goliaro/cuda-agent-checkpoints"
 
-# Scratch / working artifacts (gitignored via .gitignore: build/, *.so). Kept inside the
-# checkpoint root so a run is fully self-contained and resumable.
+# LIVE working directory (scratch).  A run does its live work under WORK_ROOT/<run_id>/ and the
+# orchestrator MIRRORS each step into CHECKPOINT_ROOT/<run_id>/ (the durable copy).  Defaults
+# INSIDE the agent dir and is gitignored (.fa3_work/); override with FA3_WORK_ROOT.  Keeping live
+# work here lets a FRESH run WIPE it so the brain's working set holds ONLY the current run -- it
+# cannot read prior runs' best.cu / candidates / chats -- while the durable archive (never handed
+# to the brain) keeps the full history.
+WORK_ROOT = os.environ.get("FA3_WORK_ROOT") or os.path.join(REPO_ROOT, ".fa3_work")
+
+# Include built .so files when mirroring the live workdir into the archive (default on, for fast
+# resume; set FA3_ARCHIVE_INCLUDE_SO=0 to keep the archive small at the cost of rebuilding on resume).
+ARCHIVE_INCLUDE_SO = os.environ.get("FA3_ARCHIVE_INCLUDE_SO", "1").lower() not in ("0", "false", "no")
+
+# Belt-and-suspenders fallback for a `claude` CLI that ignores CLAUDE_CONFIG_DIR: on a fresh run,
+# delete the brain's OWN per-project transcript dir under the default ~/.claude (slug from the brain
+# cwd = REPO_ROOT) so prior-run chats can't be read.  Scoped to the brain's slug only; default on.
+WIPE_DEFAULT_BRAIN_TRANSCRIPTS = os.environ.get("FA3_WIPE_DEFAULT_BRAIN_TRANSCRIPTS", "1").lower() not in ("0", "false", "no")
+
+
+# LIVE run dir (scratch workdir) the orchestrator and components write to during a run.
 def run_dir(run_id: str) -> str:
+    return os.path.join(WORK_ROOT, run_id)
+
+
+# DURABLE archive run dir (the mirrored, user-facing copy; what cli.py reads).
+def archive_dir(run_id: str) -> str:
     return os.path.join(CHECKPOINT_ROOT, run_id)
 
 # HuggingFace cache root for the vLLM-based gates.  Honors FA3_HF_HOME / HF_HOME from the
@@ -110,12 +134,12 @@ DELIVERABLE_NAMESPACE = "_vllm_fa3_C"  # used for the final swap into vLLM
 # Use the FULL model id, not the alias.  (settings.json also sets ANTHROPIC_MODEL=claude-opus-4-8.)
 HEADLESS_MODEL = "claude-opus-4-8"
 # Effort level passed to `claude --effort <level>` (low|medium|high|xhigh|ultracode).
-# Default high: strong single-agent reasoning for hard kernel codegen at a lower per-step cost
-# than xhigh on long runs, while the Python orchestrator (NOT the brain) owns the
-# loop/eval/multi-GPU/checkpoint and the "one candidate per step" contract.  Bump to xhigh for the
-# deepest single-agent reasoning; use ultracode only when you want the brain to do in-step
+# Default xhigh: the deepest single-agent reasoning for hard kernel codegen (worth the per-step
+# cost on these structural rewrites), while the Python orchestrator (NOT the brain) owns the
+# loop/eval/multi-GPU/checkpoint and the "one candidate per step" contract.  Drop to high for a
+# lower per-step cost on long runs; use ultracode only when you want the brain to do in-step
 # multi-variant search (costlier, the brain spawns its own workflows).
-HEADLESS_EFFORT = "high"
+HEADLESS_EFFORT = "xhigh"
 # Carry the Claude session across refine steps via `claude --resume`?  DEFAULT FALSE.
 # `--resume` replays the ENTIRE prior conversation as the new request; on the Snowflake-Cortex
 # relay that oversized payload fails with retryable "unknown" errors (observed: step 0 fresh
@@ -375,6 +399,40 @@ LSE_TOL = (5e-3, 1e-2)  # softmax_lse is fp32 and NOT used for token selection -
 PERF_TARGET_RATIO = 1.0  # "match or exceed" (spec: at least 1.0x)
 # A small measurement-noise band: treat <= this as a tie when promoting.
 PERF_NOISE_BAND = 0.02
+
+# --------------------------------------------------------------------------------------
+# Promotion objective (C1).  Which correct candidate becomes the new champion.
+#   "min"             (DEFAULT = legacy): worst-case ratio (min_ratio) with a max() ratchet +
+#                     PERF_NOISE_BAND.  Greedy on the worst config; cannot fund a structural
+#                     refactor that temporarily dips one config.
+#   "weighted_geomean": the weighted-geomean F with a NON-monotone base (champ_F := F on
+#                     promotion) and a small match-or-improve relative tolerance, so an
+#                     equal-overall-score refactor can LAND even without beating the peak.
+# min_ratio stays the success/termination gate + tie-break under BOTH objectives.  Override with
+# FA3_PROMOTION_OBJECTIVE.  Additive: the default reproduces current behavior exactly.
+PROMOTION_OBJECTIVE = os.environ.get("FA3_PROMOTION_OBJECTIVE", "min")
+# Match-or-improve relative tolerance for the weighted-geomean objective (1% by default).
+PROMOTION_F_REL_TOL = float(os.environ.get("FA3_PROMOTION_F_REL_TOL", "0.01"))
+
+# --------------------------------------------------------------------------------------
+# Plateau detection + protected rewrite branch (C2/C2b).  A SHARED PlateauState drives both the
+# STUCK trigger and the pre_plateau "knee" seed off the same champion-F series, so a regressing
+# structural rewrite can be FUNDED inside a budgeted branch with deferred adopt-or-revert.
+# --------------------------------------------------------------------------------------
+# Master switch.  Default ON (this is the plan's escape mechanism); set FA3_ENABLE_REWRITE_BRANCH=0
+# to reproduce the pre-C2 behavior exactly (STUCK only nudges the supervisor note, no branch).
+ENABLE_REWRITE_BRANCH = os.environ.get("FA3_ENABLE_REWRITE_BRANCH", "1").lower() not in ("0", "false", "no")
+STUCK_EPS = float(os.environ.get("FA3_STUCK_EPS", "0.01"))            # min F* gain over the window
+STUCK_WINDOW = int(os.environ.get("FA3_STUCK_WINDOW", "4"))           # promotions in the score-plateau window
+STUCK_STRUCTURAL_STALL = int(os.environ.get("FA3_STUCK_STRUCTURAL_STALL", "3"))  # consecutive rejected structural levers
+STUCK_MIN_REJECTS = int(os.environ.get("FA3_STUCK_MIN_REJECTS", "3")) # consecutive non-promotions
+KNEE_REL_BAND = float(os.environ.get("FA3_KNEE_REL_BAND", "0.12"))    # knee = earliest champ within this band of F*
+BRANCH_BUDGET = int(os.environ.get("FA3_BRANCH_BUDGET", "6"))         # steps a rewrite branch may spend
+BRANCH_ADOPT_REL_TOL = float(os.environ.get("FA3_BRANCH_ADOPT_REL_TOL", "0.01"))  # adopt iff tip_F >= frozen_F*(1-tol)
+BRANCH_SEED = os.environ.get("FA3_BRANCH_SEED", "pre_plateau")        # pre_plateau | champion | seed (D1)
+# D1 layout-blocker escalation: if no branch candidate has been correct after this many branch
+# steps, the knee substrate is blocking the rewrite -> escalate BRANCH_SEED to the from-scratch seed.
+BRANCH_ESCALATE_AFTER = int(os.environ.get("FA3_BRANCH_ESCALATE_AFTER", "2"))
 
 # --------------------------------------------------------------------------------------
 # Performance-measurement knobs (CUDA events; clocks unlockable -> warm + ratio).

@@ -35,6 +35,30 @@ _LOG_TAIL = 8000        # chars kept from the end (where ninja prints the real e
 _ERROR_MAX = 600        # max chars of the distilled single error message
 
 
+def _driver_ldflags() -> list[str]:
+    """Link flags so HOST code may call the CUDA driver API -- specifically the TMA encoder
+    `cuTensorMapEncodeTiled` used to build tensor maps for `cp.async.bulk.tensor` (TMA).
+
+    `torch.utils.cpp_extension.load` adds `-L<cuda>/lib64` but NOT the driver stub dir, so the
+    driver symbol is otherwise unresolved at link/load time (it lives in libcuda, whose stub
+    ships under lib64/stubs).  We add the stub dir (when present) + `-lcuda`.  Linking an unused
+    libcuda is harmless for kernels that never touch TMA, so this is always safe to include.
+    """
+    flags: list[str] = []
+    try:
+        from torch.utils.cpp_extension import CUDA_HOME  # type: ignore
+    except Exception:  # noqa: BLE001
+        CUDA_HOME = None
+    cuda_home = CUDA_HOME or os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    for sub in ("lib64/stubs", "lib/stubs", "targets/x86_64-linux/lib/stubs"):
+        if cuda_home:
+            d = os.path.join(cuda_home, *sub.split("/"))
+            if os.path.isdir(d):
+                flags.append(f"-L{d}")
+    flags.append("-lcuda")
+    return flags
+
+
 # --------------------------------------------------------------------------------------
 # log handling
 # --------------------------------------------------------------------------------------
@@ -267,6 +291,7 @@ def build_candidate(cu_path: str, namespace: str, work_dir: str,
                 is_python_module=False,
                 build_directory=work_dir,
                 extra_cuda_cflags=extra_cuda_cflags,
+                extra_ldflags=_driver_ldflags(),
                 verbose=True,
             )
         except BaseException as e:  # noqa: BLE001  (catch ninja CalledProcessError etc.)

@@ -101,19 +101,34 @@ def refine_prompt(candidate_path: str, best_path: str, last_eval_summary: str,
                   profile_feedback: str, knowledge_hints: str, focus: str,
                   supervisor_note: str = "", doc_hints: str = "",
                   sass_feedback: str = "", knowledge_notes: str = "",
-                  focus_docs: str = "") -> str:
+                  focus_docs: str = "", profile_digest: str = "",
+                  memory_digest: str = "", structural_carveout: str = "",
+                  branch_note: str = "") -> str:
     return f"""\
 You are optimizing a Hopper FlashAttention-3 kernel (single self-contained .cu). Continue from
-the current CHAMPION at {best_path} (read it). Make TARGETED edits unless you have a concrete
-reason for a rewrite.
+the current CHAMPION at {best_path} (read it). Make TARGETED edits by default — BUT a structural
+rewrite is the RIGHT move when the profiler bottleneck calls for one (e.g. an overlap-bound /
+off-tensor-core / latency-bound verdict justifies warp-specialization + TMA over a one-line tweak).
+{structural_carveout or ""}
 
 PRIORITY: if the last candidate was INCORRECT, fix correctness first (speed is secondary). If it
 was correct, raise the MINIMUM speedup ratio across ALL configs (not just the mean) while keeping
 every config correct. The perf gate is candidate latency <= baseline on every config.
 
+RUN MEMORY (cross-step continuity — this session is FRESH and has no chat history; this is what
+earlier steps learned. Honor the dead-ends: do NOT re-attempt something listed as already-tried-
+and-failed the same way. Open {best_path}'s sibling MEMORY.md for the full log):
+{memory_digest or "(empty — first steps of the run)"}
+{("REWRITE-BRANCH JOURNAL (the half-built rewrite from earlier branch rungs — CONTINUE it, do not restart):" + chr(10) + branch_note) if branch_note else ""}
+
 LAST EVAL: {last_eval_summary}
 
 PROFILER FEEDBACK (distilled, NCU): {profile_feedback or "(none yet)"}
+
+NCU DIAGNOSIS (full distilled signal — the classifier's bottleneck class, the recommended
+optimization + plan, and the evidence-cited ranked priorities incl. per-kernel time split). Treat
+this as the primary STEER for what to change this step:
+{profile_digest or "(none yet — rely on the one-line PROFILER FEEDBACK above)"}
 
 SASS (your kernel's instruction mix — wgmma/TMA presence, register spills): {sass_feedback or "(none)"}
 
@@ -143,6 +158,18 @@ WRITE the improved candidate to EXACTLY this path (overwrite):
 Then STOP. The driver will build + anti-cheat + verify correctness + profile and report back.
 """
 
+
+# D1 rung-0: a behavior-preserving refactor (no new features, no perf chase) that turns the
+# encrusted seed into a clean, extensible substrate for the structural rungs that follow.
+BRANCH_REFACTOR_FOCUS = (
+    "RUNG 0 — REFACTOR ONLY (behavior-preserving). Do NOT add features or chase speed this rung. "
+    "Restructure the kernel into ONE clean, extensible code path: collapse duplicated/special-case "
+    "branches, name the tiling/pipeline parameters, and separate the load / GEMM / softmax / "
+    "epilogue stages into clearly delineated sections so the next rungs can warp-specialize and add "
+    "a TMA pipeline without fighting the layout. Every config MUST stay correct (this is the gate). "
+    "If you find the layout fundamentally blocks separating producer/consumer warpgroups without "
+    "spilling O (the known register-pressure wall), SAY SO explicitly in your summary so the driver "
+    "can escalate to a from-scratch seed.")
 
 # Focus levers cycled by the supervisor when stuck (from AVO inflection techniques + Hopper levers)
 FOCUS_LEVERS = [
