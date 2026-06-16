@@ -74,10 +74,18 @@ SPILL_CLASSES = ["LDL_SPILL", "STL_SPILL"]
 
 # Bounds (context discipline).  Never dump SASS for more than this many kernels, and never
 # spend more than this many seconds in cuobjdump for one analyze() call.
-MAX_KERNELS_SASS = 6        # how many kernels we actually disassemble per .so
+MAX_KERNELS_SASS = 8        # how many kernels we actually disassemble per .so (>= #kernel families,
+                            # so the family-cover ranking can sample one of EACH distinct kernel)
 MAX_KERNELS_REPORT = 8      # how many kernels appear in the returned dict
 CUOBJDUMP_TIMEOUT_S = 90    # hard wall on any single cuobjdump invocation
 TOTAL_SASS_BUDGET_S = 120   # total time budget for all per-kernel SASS dumps
+
+# Itanium-mangled FREE function -> the source identifier is length-prefixed, e.g.
+# `_Z18attn_prefill_wgmmaI...` carries `18` then the 18-char name `attn_prefill_wgmma`.  We use
+# that base identifier as a coarse "kernel family" key so we sample one representative of EACH
+# distinct kernel (a scalar `attn_kernel` vs a `attn_prefill_wgmma`), instead of 6 instantiations
+# of whichever name the ranking happens to favour.
+_MANGLED_FREE_RE = re.compile(r"^_Z(\d+)([A-Za-z_]\w*)")
 
 # Resource-usage line, e.g.:
 #   REG:168 STACK:8 SHARED:1024 LOCAL:0 CONSTANT[0]:3328 TEXTURE:0 ...
@@ -165,19 +173,42 @@ def _short_name(fn: str, maxlen: int = 72) -> str:
     return fn[: maxlen - 1] + "…"
 
 
+def _family_key(fn: str) -> str:
+    """Coarse 'kernel family' key (the source base identifier) so we don't waste the SASS budget
+    on many instantiations of the SAME kernel and -- crucially -- so the bounded sample always
+    covers EACH distinct kernel.  For an Itanium-mangled free function the identifier is
+    length-prefixed (`_Z18attn_prefill_wgmmaI...` -> 'attn_prefill_wgmma'); the regex over-captures
+    into the template suffix, so we clamp to the declared length.  Falls back to the leading
+    token for namespaced/other names."""
+    m = _MANGLED_FREE_RE.match(fn)
+    if m:
+        n = int(m.group(1))
+        ident = m.group(2)
+        return ident[:n] if len(ident) >= n else ident
+    return re.split(r"[IL<(]", fn, 1)[0][:48]
+
+
 def _rank_kernels(res: "OrderedDict[str, dict]", namespace: Optional[str]) -> list[str]:
-    """Pick the most analysis-worthy kernels (bounded). Heuristics:
+    """Pick the most analysis-worthy kernels (bounded), guaranteeing per-family COVERAGE.
+
+    Heuristics:
        - prefer the obvious attention mainloop (highest reg usage / has 'FlashAttnFwdSm90'
          or 'attn_kernel'), de-prioritise tiny combine/setup kernels,
        - dedupe near-identical template instantiations by their resource fingerprint so we
-         don't waste budget disassembling 50 copies of the same shape."""
+         don't waste budget disassembling 50 copies of the same shape,
+       - then pull the best representative of EACH distinct kernel family to the FRONT.  This last
+         step is load-bearing: the summary verdict (uses_wgmma / uses_tma) is computed from the
+         sampled set, so a wgmma kernel whose symbol does NOT contain 'attn_kernel' (e.g.
+         `attn_prefill_wgmma`) must still be sampled -- otherwise scalar `attn_kernel`/`*_coop`
+         instantiations monopolise the budget and the verdict mis-reads 'no wgmma' though HGMMA is
+         present (the step041 trap)."""
     names = list(res.keys())
 
     def score(fn: str) -> tuple:
         r = res[fn]
         is_main = 1 if ("FlashAttnFwdSm90" in fn or "attn_kernel" in fn
                         or (namespace and namespace in fn)) else 0
-        is_combine = 1 if "Combine" in fn else 0
+        is_combine = 1 if "Combine" in fn or "combine" in fn else 0
         # higher regs & shared usually == the real compute kernel
         return (is_main, -is_combine, r.get("regs", 0), r.get("shared", 0))
 
@@ -191,12 +222,62 @@ def _rank_kernels(res: "OrderedDict[str, dict]", namespace: Optional[str]) -> li
             continue
         seen.add(fp)
         deduped.append(fn)
-    return deduped
+
+    # family cover: the score-best (already first-seen) member of each family leads, so the bounded
+    # sample contains one of every distinct kernel before any second instantiation.
+    cover: list[str] = []
+    rest: list[str] = []
+    seen_fam: set = set()
+    for fn in deduped:
+        fam = _family_key(fn)
+        if fam in seen_fam:
+            rest.append(fn)
+        else:
+            seen_fam.add(fam)
+            cover.append(fn)
+    return cover + rest
+
+
+def _select_targets(res: "OrderedDict[str, dict]", targets: list[str]) -> list[str]:
+    """Select the resource-usage kernels whose family matches any NCU-named `targets` kernel.
+
+    `targets` are demangled kernel names from the NCU profile (`key_metrics._kernel(s)`); we reduce
+    each to its base identifier and match by FAMILY (exact base, via `_family_key`) so 'attn_kernel'
+    does not also grab 'attn_kernel_coop'/'attn_kernel_prefill_wgmma'.  Returns the matching kernels
+    (deduped by resource fingerprint, highest-reg first) or [] when nothing matches (caller falls
+    back to the family-cover ranking)."""
+    want: set = set()
+    for t in targets or []:
+        if not t:
+            continue
+        tok = str(t).split("<", 1)[0].split("(", 1)[0].strip()
+        tok = tok.split("::")[-1].strip()
+        if tok:
+            want.add(tok)
+    if not want:
+        return []
+    matches = [fn for fn in res.keys() if _family_key(fn) in want]
+    matches.sort(key=lambda fn: res[fn].get("regs", 0), reverse=True)
+    seen: set = set()
+    out: list[str] = []
+    for fn in matches:
+        r = res[fn]
+        fp = (r.get("regs"), r.get("stack"), r.get("shared"), r.get("local"))
+        if fp in seen:
+            continue
+        seen.add(fp)
+        out.append(fn)
+    return out
 
 
 def _analyze_one(so_path: str, namespace: Optional[str],
-                 max_kernels: int) -> dict:
-    """Resource-usage for all kernels + bounded per-kernel SASS histograms."""
+                 max_kernels: int, targets: Optional[list[str]] = None) -> dict:
+    """Resource-usage for all kernels + bounded per-kernel SASS histograms.
+
+    When `targets` is given (demangled kernel names from the NCU profile), disassemble exactly the
+    matching kernel family/families -- i.e. the kernel(s) that actually DOMINATE the profiled
+    config's runtime -- so the verdict describes the hot path, not just whatever the name heuristic
+    surfaces.  Falls back to the family-cover ranking when no target matches."""
     cuobj = _cuobjdump_path()
     if cuobj is None:
         return {"error": "cuobjdump not found on PATH"}
@@ -206,7 +287,10 @@ def _analyze_one(so_path: str, namespace: Optional[str],
     rc, ru_text = _run([cuobj, "--dump-resource-usage", so_path], CUOBJDUMP_TIMEOUT_S)
     res = _parse_resource_usage(ru_text) if rc == 0 else OrderedDict()
 
-    ranked = _rank_kernels(res, namespace) if res else []
+    if res and targets:
+        ranked = _select_targets(res, targets) or _rank_kernels(res, namespace)
+    else:
+        ranked = _rank_kernels(res, namespace) if res else []
     # If resource-usage gave us nothing (unusual), fall back to a single full SASS dump.
     if not ranked:
         rc, sass = _run([cuobj, "--dump-sass", so_path], CUOBJDUMP_TIMEOUT_S)
@@ -301,7 +385,8 @@ def _diff(cand_agg: dict, ref_agg: dict, ref_label: str) -> list[str]:
 
 @logged("sass_analyze")
 def analyze(so_path: str, namespace: str, baseline_so: Optional[str] = None,
-            oracle_cubin: Optional[str] = None) -> dict:
+            oracle_cubin: Optional[str] = None,
+            targets: Optional[list[str]] = None) -> dict:
     """Distilled SASS analysis of a built `.so`/cubin.
 
     Returns a bounded dict::
@@ -318,6 +403,10 @@ def analyze(so_path: str, namespace: str, baseline_so: Optional[str] = None,
           "oracle_diff":   [ ... ],
         }
 
+    `targets` (optional) restricts the disassembly to the named kernel family/families -- pass the
+    NCU-profiled dominant kernel name(s) to get a HOT-PATH verdict (does the kernel that dominates
+    the worst config use wgmma/TMA) instead of a whole-binary 'is it present anywhere' verdict.
+
     Never returns raw SASS text.  cuobjdump cost is bounded by MAX_KERNELS_SASS +
     TOTAL_SASS_BUDGET_S (a full FA3 .so dump would otherwise be ~minutes / hundreds of MB).
     """
@@ -327,7 +416,7 @@ def analyze(so_path: str, namespace: str, baseline_so: Optional[str] = None,
         out["error"] = "cuobjdump not found on PATH"
         return out
 
-    cand = _analyze_one(so_path, namespace, MAX_KERNELS_SASS)
+    cand = _analyze_one(so_path, namespace, MAX_KERNELS_SASS, targets=targets)
     if "error" in cand and "kernels" not in cand:
         out["error"] = cand["error"]
         return out

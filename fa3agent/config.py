@@ -176,7 +176,7 @@ HEADLESS_FAILURE_RETRIES = 1
 # `--resume` is gated by HEADLESS_RESUME_SESSION, which is off because the relay chokes on it);
 # functionally the brain still continues its own just-written work.  Set the gate to 0 to disable.
 COMPLETION_GATE = os.environ.get("FA3_COMPLETION_GATE", "1") not in ("0", "false", "False")
-MAX_COMPLETION_ATTEMPTS = int(os.environ.get("FA3_MAX_COMPLETION_ATTEMPTS", "2"))
+MAX_COMPLETION_ATTEMPTS = int(os.environ.get("FA3_MAX_COMPLETION_ATTEMPTS", "3"))
 
 
 # Toolkit-only nvcc flags (NO cutlass/cute include path -> anti-cheat by construction).

@@ -109,7 +109,10 @@ class StepRecord:
     anticheat: Optional[dict] = None
     eval: Optional[dict] = None
     profile: Optional[dict] = None
-    sass: Optional[dict] = None
+    sass: Optional[dict] = None        # whole-binary SASS verdict (presence of wgmma/TMA anywhere)
+    sass_hot: Optional[dict] = None    # SASS verdict for the NCU-DOMINANT kernel of the worst config
+                                       # (does the bottleneck kernel itself use wgmma/TMA); preferred
+                                       # by _sass_flags for lever foundation-gate routing
     knowledge_note: Optional[str] = None
     focus: Optional[str] = None        # the steer/lever applied this step (E1 causal lessons)
     lever_id: Optional[str] = None     # id of the B3 lever applied this step (outcome tracking)

@@ -149,8 +149,15 @@ def _sass_flags(rec: Optional[dict]) -> tuple[Optional[bool], Optional[bool], Op
     Feeds the lever selector's foundation gates (B3b): an overlap/off-tensor-core bottleneck on a
     kernel that has wgmma but NO TMA should land the TMA pipeline before warp-specialization; a slow
     fp8 worst-config with wgmma but NO fp8 wgmma (QGMMA) should land fp8 tensor cores first.
-    Unknown (no SASS) -> all None so the gates stay conservative (they fire only on explicit False)."""
-    s = rec.get("sass") if isinstance(rec, dict) else None
+    Unknown (no SASS) -> all None so the gates stay conservative (they fire only on explicit False).
+
+    Prefers `sass_hot` (the NCU-dominant kernel of the worst config) over `sass` (whole-binary
+    presence) so the gate reflects whether the BOTTLENECK kernel uses the technique -- not merely
+    whether some other kernel in the .so happens to (e.g. a prefill wgmma path while the slow decode
+    config still runs scalar).  Falls back to the whole-binary verdict when no hot verdict exists."""
+    s = None
+    if isinstance(rec, dict):
+        s = rec.get("sass_hot") or rec.get("sass")
     if not isinstance(s, dict) or not s.get("ok"):
         return None, None, None
     summ = s.get("summary") or {}
@@ -562,6 +569,37 @@ class Orchestrator:
                 self._log(f"[sass] {sl[:150]}")
         return "built", br
 
+    def _attach_hot_sass(self, rec: StepRecord, so_path: Optional[str], ns: str,
+                         profile: Optional[dict]) -> None:
+        """Re-run SASS targeting EXACTLY the kernel(s) NCU found dominant for the worst config, and
+        store the verdict on rec.sass_hot.  This is the hot-path signal the next step's lever
+        foundation gate reads (via _sass_flags): 'is the BOTTLENECK kernel on tensor cores?' rather
+        than 'does any kernel in the .so contain wgmma?'.  Best-effort; leaves sass_hot None (so
+        _sass_flags falls back to the whole-binary verdict) when NCU named no kernel."""
+        if not (self.comp.get("sass_analyze") and so_path and isinstance(profile, dict)):
+            return
+        km = profile.get("key_metrics") or {}
+        names: list[str] = []
+        kn = km.get("_kernel")
+        if kn:
+            names.append(kn)
+        for k in (km.get("_kernels") or []):
+            n = k.get("name") if isinstance(k, dict) else None
+            if n and n not in names:
+                names.append(n)
+        names = [n for n in names if n and n != "?"]
+        if not names:
+            return
+        try:
+            hot = self.comp["sass_analyze"](so_path, ns, targets=names)
+        except Exception as e:  # noqa - best-effort
+            hot = {"ok": False, "error": repr(e)}
+        rec.sass_hot = hot
+        sl = _sass_line(hot)
+        if sl:
+            kn0 = names[0].split("<", 1)[0].split("(", 1)[0]
+            self._log(f"[sass:hot] dominant kernel ({kn0[:48]}) verdict: {sl[:130]}")
+
     def _check_correctness_only(self, ns: str):
         """Run just the synthetic correctness check (no perf/profile) for the completion gate."""
         if not self.comp.get("check_correctness"):
@@ -683,8 +721,15 @@ class Orchestrator:
 
         cres = None            # completion-gate correctness result, reused by _evaluate when set
         attempt = 0
+        # Each in-process build/load within ONE step MUST use a distinct op namespace: build_candidate
+        # loads the .so in-process to read its schema, and reloading a second .so under the SAME
+        # TORCH_LIBRARY namespace re-runs registration during dlopen -> std::terminate/SIGABRT (no
+        # Python traceback).  So a completion-fix rebuild gets ns_try = <ns>_c<attempt>; the FINAL
+        # ns_try is recorded on rec.build and threaded to eval + the run()-level gates via _built_ns.
+        ns_try = ns
         while True:
-            phase, br = self._build_and_scan(cid, ns, cand_path, rec)
+            ns_try = ns if attempt == 0 else f"{ns}_c{attempt}"
+            phase, br = self._build_and_scan(cid, ns_try, cand_path, rec)
             if phase == "cheat":
                 rec.status = "cheat"
                 self._distill(rec, f"Anti-cheat rejected: {(rec.anticheat or {}).get('violations')}",
@@ -706,7 +751,7 @@ class Orchestrator:
                 if not _sass_has(rec.sass, want):
                     gaps.append(f"{levers.VERIFY_LABELS.get(want, want)} — but SASS shows it is NOT "
                                 f"present, so the intended path was not actually taken")
-                cres = self._check_correctness_only(ns)
+                cres = self._check_correctness_only(ns_try)
                 if cres is not None:
                     bad = [r.config for r in cres if not r.correct]
                     if bad:
@@ -740,8 +785,12 @@ class Orchestrator:
         uses_wgmma = None
         if isinstance(rec.sass, dict) and rec.sass.get("ok"):
             uses_wgmma = (rec.sass.get("summary") or {}).get("uses_wgmma")
-        ev, profile = self._evaluate(step, cid, ns, br.so_path, uses_wgmma=uses_wgmma,
+        ev, profile = self._evaluate(step, cid, ns_try, br.so_path, uses_wgmma=uses_wgmma,
                                      precomputed_cres=cres)
+        # Hot-path SASS verdict: re-analyze EXACTLY the kernel(s) NCU found dominant for the worst
+        # config, so the next step's lever foundation gate (via _sass_flags) sees whether the
+        # BOTTLENECK kernel is on tensor cores -- not merely whether ANY kernel in the .so has wgmma.
+        self._attach_hot_sass(rec, br.so_path, ns_try, profile)
 
         # Sanitizer (memcheck) ONLY when a built kernel fails correctness in a way that smells like a
         # memory bug (raised / NaN-inf / illegal / shape) -- a bounded report instead of leaving the
@@ -941,7 +990,7 @@ class Orchestrator:
         Missing components / skips do NOT block (mirrors the trunk gate semantics)."""
         if not so_path or not os.path.exists(so_path):
             return False
-        ns = self._ns_cid(cid)
+        ns = self._built_ns(self._find_step_rec(cid)) or self._ns_cid(cid)
         gpu = self.pool.gpu_ids[0]
         try:
             if self.comp.get("check_cuda_graph"):
@@ -966,6 +1015,14 @@ class Orchestrator:
             return self._ns(int(cid.replace("step", "")))
         except Exception:
             return f"{C.DISTILL_NAMESPACE}_{cid}"
+
+    def _built_ns(self, rec) -> Optional[str]:
+        """The op namespace the candidate .so was ACTUALLY compiled with -- it may differ from the
+        base self._ns(step) when an in-step completion-fix rebuilt under <ns>_c<attempt>.  Every
+        downstream consumer that loads the .so (perf re-measure, cuda-graph / in-situ / decode gates,
+        branch-tip gate) must use THIS, not the base namespace, or torch.ops.<ns> won't resolve."""
+        b = (rec.get("build") if isinstance(rec, dict) else getattr(rec, "build", None)) or {}
+        return b.get("namespace")
 
     def _branch_finish(self, best: Optional[dict]) -> Optional[dict]:
         """Budget reached: ADOPT the branch tip iff it matches-or-beats the frozen champion within
@@ -1074,7 +1131,8 @@ class Orchestrator:
                 mr2 = mr
                 if so and self.comp.get("measure"):
                     from fa3agent.perf.measure import measure_all_subprocess
-                    rem = measure_all_subprocess(self._ns(rec.step), self.cfgs, so, self.pool.gpu_ids)
+                    rem = measure_all_subprocess(self._built_ns(rec) or self._ns(rec.step),
+                                                 self.cfgs, so, self.pool.gpu_ids)
                     rr = [r.ratio for r in rem if r.ratio > 0]
                     mr2 = min(rr) if rr else 0.0
                     self._log(f"[verify] success re-measure: min_ratio {mr:.3f} -> {mr2:.3f} (isolated)")
@@ -1184,7 +1242,7 @@ class Orchestrator:
             # correct promotion candidate; a real (non-skip) failure blocks promotion and is fed back.
             if rec.status == "correct" and rec.eval and self.comp.get("check_cuda_graph"):
                 if self._is_promo_candidate(rec):
-                    so = (rec.build or {}).get("so_path"); ns = self._ns(rec.step)
+                    so = (rec.build or {}).get("so_path"); ns = self._built_ns(rec) or self._ns(rec.step)
                     if so:
                         gpu = self.pool.gpu_ids[0]
                         with self.pool.exclusive(gpu):
@@ -1208,7 +1266,7 @@ class Orchestrator:
             if self.do_decode_equiv and rec.status == "correct" and rec.eval:
                 mr = rec.eval.get("min_ratio", 0.0)
                 promo_cand = self._is_promo_candidate(rec)
-                so = (rec.build or {}).get("so_path"); ns = self._ns(rec.step)
+                so = (rec.build or {}).get("so_path"); ns = self._built_ns(rec) or self._ns(rec.step)
                 if promo_cand and so and self.comp.get("check_insitu"):
                     gpu = self.pool.gpu_ids[0]
                     with self.pool.exclusive(gpu):
