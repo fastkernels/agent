@@ -70,7 +70,10 @@ def init_run(run_id: str, meta: dict, resume: bool = False) -> dict:
     if resume:
         if not os.path.exists(work) and os.path.isdir(archive):
             try:
-                shutil.copytree(archive, work)
+                # NEVER restore rolled_back/ into the live workdir: it holds the discarded-step data
+                # that a rollback deliberately deleted from the workdir (the brain sees the workdir
+                # via --add-dir and must not be able to read it).  It stays only in the archive.
+                shutil.copytree(archive, work, ignore=shutil.ignore_patterns("rolled_back"))
             except Exception:  # noqa: BLE001  (best-effort restore; init recreates dirs below)
                 pass
     else:

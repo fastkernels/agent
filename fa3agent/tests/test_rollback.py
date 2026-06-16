@@ -185,6 +185,40 @@ def main() -> int:
         ok_meta = meta.get("rollbacks") and meta["rollbacks"][-1]["to_step"] == N
         _ok("meta.json rollback audit recorded") if ok_meta else _fail(f"meta={meta}", fails)
 
+    # --- workdir PURGE mode (delete=True) -------------------------------------------------
+    # The discarded artifacts must be DELETED from the workdir (the brain sees it via --add-dir)
+    # and PRESERVED in an external checkpoint sink instead -- including workdir-only data (an
+    # orphan partial candidate + the brain's .claude) that the archive pass never had.
+    with tempfile.TemporaryDirectory() as work, tempfile.TemporaryDirectory() as ck:
+        _build_run(work, LAST, BEST, HIST)  # _build_run already creates .claude/history.jsonl
+        os.makedirs(os.path.join(work, "builds", "step099"), exist_ok=True)        # orphan, not in lineage
+        open(os.path.join(work, "candidates", "step099.cu"), "w").write("// orphan\n")
+        p = RB.compute_plan(steps, N)
+        sub = os.path.join("rolled_back", "test")
+        sink = os.path.join(ck, sub)
+        RB._apply_to_dir(work, p, sub, lever_state, log=lambda m: None, delete=True, sink=sink)
+
+        no_local = not os.path.exists(os.path.join(work, sub))
+        no_claude = not os.path.exists(os.path.join(work, ".claude"))
+        gone = all(not os.path.exists(os.path.join(work, "builds", f"step{s:03d}")) for s in (4, 5, 6, 7, 99))
+        kept = all(os.path.isdir(os.path.join(work, "builds", f"step{s:03d}")) for s in (0, 1, 2, 3))
+        (_ok("workdir purge: no local subfolder; step>N + orphan + .claude deleted; <=N kept")
+         if (no_local and no_claude and gone and kept)
+         else _fail(f"purge local={no_local} claude={no_claude} gone={gone} kept={kept}", fails))
+
+        pres = (os.path.exists(os.path.join(sink, "builds", "step007"))
+                and os.path.exists(os.path.join(sink, "builds", "step099"))
+                and os.path.exists(os.path.join(sink, ".claude", "history.jsonl"))
+                and os.path.exists(os.path.join(sink, "candidates.jsonl")))
+        (_ok("workdir purge: discarded data (incl. orphan + .claude) preserved in external sink")
+         if pres else _fail("external sink missing preserved data", fails))
+
+        wlive = open(os.path.join(work, "run.log")).read()
+        ok_state = ("=== STEP 4 " not in wlive and "step 3" in open(os.path.join(work, "best.cu")).read()
+                    and json.load(open(os.path.join(work, "memory_state.json")))["champion"]["cid"] == "step003")
+        _ok("workdir purge: run.log truncated, best.cu + memory rolled back") if ok_state \
+            else _fail("purge run.log/best.cu/memory wrong", fails)
+
     print("\n" + ("ALL CHECKS PASSED" if not fails else f"{len(fails)} CHECK(S) FAILED"))
     return 0 if not fails else 1
 

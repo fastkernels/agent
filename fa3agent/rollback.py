@@ -8,17 +8,19 @@
                        rolled-back steps (> N) into one timestamped `rolled_back/<...>/` subfolder
                        of the run dir, then resume at N+1 from the champion as of step N.
 
-Everything for the discarded steps is *moved* (not deleted) so it stays inspectable but can NEVER
-be read by the resumed agent and can't be confused with the new trajectory: per-step build dirs,
-candidate sources, the removed `candidates.jsonl` tail, the run.log tail, the evolution plot, the
-step>N knowledge notes, the transient profiling reports, and the brain's per-run `.claude`.  The
-kept cross-step state is rolled back to its step-N value: the lever ledger is replayed over its
-<=N outcome history, branch state is reset (resume rebuilds the champion series from the truncated
-lineage), cross-step memory is rebuilt to point at the step-N champion (lessons + dead-ends
-cleared), and `best.cu` is restored to the champion's source.
+Everything for the discarded steps is preserved in the durable CHECKPOINT archive (under
+`rolled_back/<...>/`) but DELETED OUTRIGHT from the live workdir: per-step build dirs, candidate
+sources, the removed `candidates.jsonl` tail, the run.log tail, the evolution plot, the step>N
+knowledge notes, the transient profiling reports, and the brain's per-run `.claude`.  This matters
+because the brain gets the workdir via ``--add-dir`` -- if the rolled-back code lived anywhere
+under the workdir the brain could (and did) read it and resurrect a discarded trajectory.  Keeping
+the only copy in CHECKPOINT_ROOT (which the brain is NEVER granted) makes it inspectable to the
+user while invisible to the agent.
 
-The same surgery is applied to BOTH the live workdir (WORK_ROOT, the source of truth for resume)
-and the durable archive (CHECKPOINT_ROOT) so neither shows phantom future-step data.
+The kept cross-step state is rolled back to its step-N value in BOTH dirs: the lever ledger is
+replayed over its <=N outcome history, branch state is reset (resume rebuilds the champion series
+from the truncated lineage), cross-step memory is rebuilt to point at the step-N champion (lessons
++ dead-ends cleared), and `best.cu` is restored to the champion's source.
 """
 from __future__ import annotations
 
@@ -81,7 +83,8 @@ def ensure_workdir(run_id: str) -> str:
     archive = C.archive_dir(run_id)
     if not os.path.isdir(work) and os.path.isdir(archive):
         try:
-            shutil.copytree(archive, work)
+            # exclude rolled_back/ -- the discarded data lives only in the archive, never the workdir
+            shutil.copytree(archive, work, ignore=shutil.ignore_patterns("rolled_back"))
         except Exception as e:  # noqa: BLE001
             print(f"[rollback] WARN could not restore workdir from archive: {e!r}")
     return work
@@ -107,7 +110,9 @@ def plan(run_id: str, from_step: int) -> dict:
 
 
 def rollback(run_id: str, from_step: int, log: Callable = print) -> dict:
-    """Apply the rollback to the live workdir AND the durable archive.  Returns {"subfolder": ...}."""
+    """Roll a run back to `from_step`: PRESERVE the discarded artifacts in the durable archive and
+    DELETE them from the live workdir (so the brain, which sees the workdir, can't read them).
+    Returns {"subfolder": ..., "archived_in": ...}."""
     steps = checkpoint.load_steps(run_id)
     p = compute_plan(steps, from_step)
     if not p.get("ok") or p.get("noop"):
@@ -116,6 +121,8 @@ def rollback(run_id: str, from_step: int, log: Callable = print) -> dict:
 
     # Replay the lever ledger once (live + archive share the lineage) and reuse for both dirs.
     live = checkpoint.paths(run_id)["run"]
+    archive = C.archive_dir(run_id)
+    archive_sink = os.path.join(archive, sub)
     hist = []
     lv_path = os.path.join(live, "lever_state.json")
     if os.path.exists(lv_path):
@@ -125,10 +132,17 @@ def rollback(run_id: str, from_step: int, log: Callable = print) -> dict:
             hist = []
     lever_state = _rebuild_lever_state(hist, from_step)
 
-    for base in (live, C.archive_dir(run_id)):
-        if os.path.isdir(base):
-            _apply_to_dir(base, p, sub, lever_state, log=log)
-    return {"subfolder": sub}
+    # 1. Archive FIRST: stow the archive's own step>N data under archive/rolled_back/<sub>/ and roll
+    #    its top-level state back to step N (so the durable copy keeps both the discarded data and a
+    #    clean <=N tip).
+    if os.path.isdir(archive):
+        _apply_to_dir(archive, p, sub, lever_state, log=log)
+    # 2. Workdir: preserve any workdir-only extras (orphan partials, the brain's .claude) into the
+    #    archive sink if missing, then DELETE every discarded artifact from the workdir -- no local
+    #    rolled_back/ folder is created, so nothing the brain can reach survives.
+    if os.path.isdir(live):
+        _apply_to_dir(live, p, sub, lever_state, log=log, delete=True, sink=archive_sink)
+    return {"subfolder": sub, "archived_in": archive_sink}
 
 
 def apply(run_id: str, target_step: int, assume_yes: bool = False, log: Callable = print) -> bool:
@@ -145,14 +159,15 @@ def apply(run_id: str, target_step: int, assume_yes: bool = False, log: Callable
         log(f"[rollback] {p.get('msg')}; resuming {run_id} normally")
         return True
 
-    rd = checkpoint.paths(run_id)["run"]
     champ_step = (p.get("champ") or {}).get("step")
+    archive_sink = os.path.join(C.archive_dir(run_id), "rolled_back")
     log(f"[rollback] {run_id}: keep steps <= {target_step} "
         f"(champion {p['champ_cid']} @ step {champ_step}); "
         f"discard {len(p['removed_steps'])} step(s): {p['removed_steps']}")
     log(f"[rollback]   builds/candidates/run.log/plots/knowledge/reports/.claude for the discarded "
-        f"steps move to {rd}/rolled_back/; memory/lever/branch state roll back to step "
-        f"{target_step}; next step = {target_step + 1}")
+        f"steps are PRESERVED in the checkpoint archive ({archive_sink}/) and DELETED from the "
+        f"workdir; memory/lever/branch state roll back to step {target_step}; next step = "
+        f"{target_step + 1}")
     if not assume_yes:
         if sys.stdin and sys.stdin.isatty():
             ans = input(f"Proceed with rollback of {run_id} to step {target_step}? [y/N] ").strip().lower()
@@ -205,15 +220,47 @@ def _copy(base: str, rel: str, sub: str) -> None:
         pass
 
 
+def _preserve_to(src: str, dst: str) -> None:
+    """Copy src -> dst (file or dir) only if dst is absent (don't clobber the archived copy)."""
+    if not os.path.exists(src) or os.path.exists(dst):
+        return
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    try:
+        if os.path.isdir(src):
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _evict(base: str, rel: str, sink: str, log: Callable) -> bool:
+    """Preserve base/rel into sink/rel (copy if absent), then DELETE base/rel.  For the workdir, whose
+    only durable copy must live in the external (checkpoint) sink, never under the workdir itself."""
+    src = os.path.join(base, rel)
+    if not os.path.exists(src):
+        return False
+    _preserve_to(src, os.path.join(sink, rel))
+    try:
+        if os.path.isdir(src):
+            shutil.rmtree(src, ignore_errors=True)
+        else:
+            os.remove(src)
+    except OSError as e:
+        log(f"[rollback]   WARN could not delete {rel}: {e!r}")
+    return True
+
+
 _STEP_ARTIFACT_RE = re.compile(r"^step(\d+)(?:\.\w+)?$")
 
 
-def _sweep_step_artifacts(base: str, subdir: str, target_step: int, sub: str, log: Callable) -> int:
-    """Move every base/<subdir>/stepNNN[.ext] whose step number > target_step into the subfolder.
+def _sweep_step_artifacts(base: str, subdir: str, target_step: int, discard: Callable) -> int:
+    """Discard every base/<subdir>/stepNNN[.ext] whose step number > target_step.
 
     Disk-driven (not lineage-driven) so it also sweeps ORPHANS -- a candidate from a generation that
     was interrupted before it was recorded, or stale dirs left by an older/aborted trajectory -- not
-    just the step records still present in candidates.jsonl."""
+    just the step records still present in candidates.jsonl.  ``discard(rel)`` stows the artifact
+    (locally for the archive, or into the external sink + delete for the workdir)."""
     d = os.path.join(base, subdir)
     if not os.path.isdir(d):
         return 0
@@ -221,7 +268,7 @@ def _sweep_step_artifacts(base: str, subdir: str, target_step: int, sub: str, lo
     for name in sorted(os.listdir(d)):
         m = _STEP_ARTIFACT_RE.match(name)
         if m and int(m.group(1)) > target_step:
-            moved += _move(base, os.path.join(subdir, name), sub, log)
+            moved += bool(discard(os.path.join(subdir, name)))
     return moved
 
 
@@ -261,8 +308,15 @@ def _rebuild_lever_state(history: list, target_step: int) -> dict:
         shutil.rmtree(tmpd, ignore_errors=True)
 
 
-def _apply_to_dir(base: str, p: dict, sub: str, lever_state: dict, log: Callable = print) -> None:
-    """Apply the rollback to a single run directory (live workdir OR archive).
+def _apply_to_dir(base: str, p: dict, sub: str, lever_state: dict, log: Callable = print,
+                  delete: bool = False, sink: Optional[str] = None) -> None:
+    """Apply the rollback to a single run directory.
+
+    delete=False (the ARCHIVE): discarded artifacts are MOVED into base/<sub>/ (kept locally,
+    durable, inspectable) and old state files are snapshotted there before being reset.
+    delete=True (the WORKDIR): discarded artifacts are PRESERVED into the external `sink` (the
+    archive's rolled_back/<sub>/) only if not already there, then DELETED from base -- no base/<sub>/
+    is created, so nothing reachable by the brain survives under the workdir.
 
     Operates purely on `base` + the precomputed plan `p` / `lever_state` (no WORK_ROOT/
     CHECKPOINT_ROOT config or GPU dependency) so it is unit-testable.
@@ -272,10 +326,25 @@ def _apply_to_dir(base: str, p: dict, sub: str, lever_state: dict, log: Callable
     N = p["target"]
     champ_cid = p.get("champ_cid")
     champ = p.get("champ") or {}
-    os.makedirs(os.path.join(base, sub), exist_ok=True)
-    log(f"[rollback] {base} -> keep step<={N}, archive the rest under {sub}/")
+    sink = sink or os.path.join(base, sub)
 
-    # 1. lineage: keep step<=N in place, MOVE the step>N tail into the subfolder.
+    def discard(rel: str) -> bool:
+        """Remove base/rel; archive mode stows it under base/<sub>/, workdir mode evicts to sink."""
+        return _evict(base, rel, sink, log) if delete else _move(base, rel, sub, log)
+
+    def preserve_state(rel: str) -> None:
+        """Preserve a state file's pre-rollback value before it is reset in place."""
+        if delete:
+            _preserve_to(os.path.join(base, rel), os.path.join(sink, rel))
+        else:
+            _copy(base, rel, sub)
+
+    if not delete:
+        os.makedirs(os.path.join(base, sub), exist_ok=True)
+    log(f"[rollback] {base} -> keep step<={N}; "
+        + (f"DELETE step>{N} (preserved in {sink}/)" if delete else f"stow step>{N} under {sub}/"))
+
+    # 1. lineage: keep step<=N in place; preserve the step>N tail, drop it from the live file.
     jsonl = os.path.join(base, "candidates.jsonl")
     if os.path.exists(jsonl):
         kept_lines, removed_lines = [], []
@@ -291,26 +360,33 @@ def _apply_to_dir(base: str, p: dict, sub: str, lever_state: dict, log: Callable
                     continue
                 (kept_lines if step <= N else removed_lines).append(line)
         if removed_lines:
-            with open(os.path.join(base, sub, "candidates.jsonl"), "w") as fh:
-                fh.write("\n".join(removed_lines) + "\n")
+            tail = os.path.join(sink if delete else os.path.join(base, sub), "candidates.jsonl")
+            if not (delete and os.path.exists(tail)):
+                os.makedirs(os.path.dirname(tail), exist_ok=True)
+                with open(tail, "w") as fh:
+                    fh.write("\n".join(removed_lines) + "\n")
         tmp = jsonl + ".tmp"
         with open(tmp, "w") as fh:
             fh.write("\n".join(kept_lines) + ("\n" if kept_lines else ""))
         os.replace(tmp, jsonl)
-        log(f"[rollback]   lineage: kept {len(kept_lines)}, archived {len(removed_lines)}")
+        log(f"[rollback]   lineage: kept {len(kept_lines)}, dropped {len(removed_lines)}")
 
     # 2. per-step build dirs + candidate sources for EVERY step > N on disk (disk-driven, not just
     #    the records still in the lineage) -- catches orphans from an interrupted generation or an
     #    older/aborted trajectory.
-    nb = _sweep_step_artifacts(base, "builds", N, sub, log)
-    nc = _sweep_step_artifacts(base, "candidates", N, sub, log)
+    nb = _sweep_step_artifacts(base, "builds", N, discard)
+    nc = _sweep_step_artifacts(base, "candidates", N, discard)
     if nb or nc:
-        log(f"[rollback]   moved {nb} build dir(s) + {nc} candidate source(s) for step>{N}")
+        log(f"[rollback]   {'deleted' if delete else 'stowed'} {nb} build dir(s) + {nc} "
+            f"candidate source(s) for step>{N}")
 
-    # 3. run.log: snapshot the full log, then truncate the live one at the first step>N banner.
+    # 3. run.log: preserve the full log, then truncate the live one at the first step>N banner.
     runlog = os.path.join(base, "run.log")
     if os.path.exists(runlog):
-        _copy(base, "run.log", sub)
+        if delete:
+            _preserve_to(runlog, os.path.join(sink, "run.log"))
+        else:
+            _copy(base, "run.log", sub)
         with open(runlog, encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
         cut = None
@@ -322,16 +398,16 @@ def _apply_to_dir(base: str, p: dict, sub: str, lever_state: dict, log: Callable
         if cut is not None:
             with open(runlog, "w", encoding="utf-8", errors="replace") as fh:
                 fh.writelines(lines[:cut])
-                fh.write(f"[rollback] --- rolled back to step {N}; later steps archived under "
-                         f"{sub}/ ---\n")
-            log(f"[rollback]   run.log truncated at step {N+1} (full copy in {sub}/)")
+                fh.write(f"[rollback] --- rolled back to step {N}; later steps preserved in the "
+                         f"checkpoint archive ---\n")
+            log(f"[rollback]   run.log truncated at step {N+1}")
 
     # 4. evolution plot(s) (regenerated on the next step from the truncated lineage).
     plots = os.path.join(base, "plots")
     if os.path.isdir(plots):
         for fn in list(os.listdir(plots)):
             if fn.endswith((".png", ".svg", ".pdf")):
-                _move(base, os.path.join("plots", fn), sub, log)
+                discard(os.path.join("plots", fn))
 
     # 5. knowledge notes authored after the target step.
     kdir = os.path.join(base, "knowledge")
@@ -342,18 +418,18 @@ def _apply_to_dir(base: str, p: dict, sub: str, lever_state: dict, log: Callable
                 continue
             st = _note_step(os.path.join(kdir, fn))
             if st is not None and st > N:
-                moved += _move(base, os.path.join("knowledge", fn), sub, log)
+                moved += bool(discard(os.path.join("knowledge", fn)))
         if moved:
-            log(f"[rollback]   archived {moved} step>{N} knowledge note(s)")
+            log(f"[rollback]   {'deleted' if delete else 'stowed'} {moved} step>{N} knowledge note(s)")
 
-    # 6. transient profiling reports (no per-step granularity) -> archive wholesale, recreate empty.
+    # 6. transient profiling reports (no per-step granularity) -> discard wholesale, recreate empty.
     if os.path.isdir(os.path.join(base, "reports")):
-        _move(base, "reports", sub, log)
+        discard("reports")
         os.makedirs(os.path.join(base, "reports"), exist_ok=True)
 
-    # 7. snapshot the current cross-step state, then roll each file back to its step-N value.
+    # 7. preserve the current cross-step state, then roll each file back to its step-N value.
     for rel in _STATE_FILES:
-        _copy(base, rel, sub)
+        preserve_state(rel)
 
     # 7a. lever ledger -> step-N replay (precomputed).
     with open(os.path.join(base, "lever_state.json"), "w") as fh:
@@ -393,8 +469,9 @@ def _apply_to_dir(base: str, p: dict, sub: str, lever_state: dict, log: Callable
             log(f"[rollback]   best.cu <- candidates/{champ_cid}.cu")
 
     # 8. the brain's per-run Claude memory (so the resumed brain starts clean from step N;
-    #    re-seeded on the next orchestrator init).
-    _move(base, ".claude", sub, log)
+    #    re-seeded on the next orchestrator init).  Workdir-only, so the workdir pass is what
+    #    actually preserves it into the checkpoint sink before deleting it.
+    discard(".claude")
 
     # 9. audit trail in meta.json.
     meta_p = os.path.join(base, "meta.json")
