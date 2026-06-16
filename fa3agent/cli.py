@@ -52,6 +52,20 @@ class _Tee:
         return False
 
 
+def _maybe_rollback(run_id: str, from_step: int, resume: bool, assume_yes: bool):
+    """Handle --from-step.  Returns an int exit code to ABORT cmd_run, or None to continue
+    (no rollback needed, or the rollback completed and the run should resume from from_step+1).
+
+    All the heavy lifting (plan, confirmation, dual workdir+archive surgery) lives in
+    fa3agent.rollback.apply(); here we only enforce that --from-step implies a resume."""
+    from . import rollback as RB
+
+    if not resume:
+        print("--from-step requires --resume (it resumes an existing run from an earlier step)")
+        return 2
+    return None if RB.apply(run_id, from_step, assume_yes=assume_yes) else 1
+
+
 def cmd_run(a):
     from .orchestrator import Orchestrator
     run_id = a.run_id
@@ -61,6 +75,14 @@ def cmd_run(a):
             print("no run to resume"); return 2
     if not run_id:
         run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}"
+
+    # Optional rollback: resume from an EARLIER step.  Keep steps <= --from-step, archive the rest,
+    # and continue at N+1.  Done BEFORE the orchestrator is built so its in-memory stores (memory /
+    # levers / plateau) load the rolled-back state.
+    if a.from_step is not None:
+        rc = _maybe_rollback(run_id, a.from_step, a.resume, a.yes)
+        if rc is not None:
+            return rc
 
     print(f"run_id={run_id}  configs={a.configs}  max_steps={a.max_steps}  model={a.model}  "
           f"effort={a.effort}  resume={a.resume}")
@@ -193,6 +215,12 @@ def main(argv=None):
                    help="reasoning effort for the headless brain (default high)")
     r.add_argument("--run-id", default=None)
     r.add_argument("--resume", action="store_true")
+    r.add_argument("--from-step", type=int, default=None,
+                   help="resume from an earlier step: keep steps <= N, archive the rest under a "
+                        "rolled_back/ subfolder, and continue at N+1 (requires --resume; a step "
+                        ">= the last completed step is a normal resume)")
+    r.add_argument("--yes", "-y", action="store_true",
+                   help="skip the interactive rollback confirmation (for non-interactive/background runs)")
     r.add_argument("--decode-tokens", type=int, default=100)
     r.add_argument("--no-decode-equiv", action="store_true", help="skip the 100-token greedy gate")
     r.add_argument("--no-profile", action="store_true", help="skip NCU profiling (faster machinery test)")
