@@ -47,9 +47,11 @@ def main() -> int:
             "register-spill": "setmaxnreg-split-registers",
             "latency-bound": "tma-load",
             "dram-bandwidth-bound": "tma-load",
-            # occupancy-bound -> register reduction FIRST (rung 5) before split-K/persistent: a
-            # warp-starved (low-occupancy) tensor-core kernel is almost always register/smem-bound.
-            "occupancy-bound": "setmaxnreg-split-registers",
+            # generic (decode small-grid) occupancy-bound -> split-K first (lowest-rung occupancy
+            # lever).  The register-starved tensor-core flavour is a SEPARATE label, see (1b).
+            "occupancy-bound": "decode-splitkv",
+            # register/occupancy-starved tensor cores -> register reduction FIRST (gate 2b).
+            "register-occupancy-bound": "setmaxnreg-split-registers",
             "sync-bound": "warp-specialize",
         }
         bad = {bn: c.select(bn, 0).id for bn in cases if c.select(bn, 0).id != cases[bn]}
@@ -57,6 +59,26 @@ def main() -> int:
             _ok("all bottleneck->lever selections correct")
         else:
             failures += _fail(f"wrong selections: {bad}")
+
+    # ---- (1b) register-occupancy-bound: register reduction first, persistently, then the pool ----
+    print("[1b] register-occupancy-bound attacks registers first (gate 2b), then the occupancy pool")
+    with tempfile.TemporaryDirectory() as d:
+        c = LeverController(d)
+        # even with a prior try on setmaxnreg (breadth-first would defer it), gate 2b keeps it first
+        c.record_outcome("setmaxnreg-split-registers", "no_effect", step=0)
+        first = c.select("register-occupancy-bound", 1).id
+        # exhaust register reduction -> must fall through to the breadth-first occupancy pool
+        for _ in range(L.LEVER_MAX_FAILS):
+            c.record_outcome("setmaxnreg-split-registers", "no_effect", step=1)
+        after = c.select("register-occupancy-bound", 2).id
+        if (first == "setmaxnreg-split-registers"
+                and c.is_exhausted("setmaxnreg-split-registers")
+                and after in {"decode-splitkv", "persistent-l2-scheduling",
+                              "clusters-tma-multicast", "async-store-epilogue"}):
+            _ok(f"register reduction first (despite a prior try) -> then occupancy pool ({after})")
+        else:
+            failures += _fail(f"register-occupancy routing wrong: first={first} after={after} "
+                              f"exhausted={c.is_exhausted('setmaxnreg-split-registers')}")
 
     # ---- (2) B3b later-ladder techniques are first-class structural levers ----
     print("[2] later-ladder techniques are first-class structural levers (B3b)")

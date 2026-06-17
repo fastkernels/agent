@@ -153,12 +153,12 @@ CATALOG: list = [
         success="tensor-pipe %active stays high while MUFU/transcendental runs; SM SOL rises",
         rung=5),
     Lever(
-        # Fires on register-spill AND on a register/occupancy-starved tensor-core kernel (the
-        # occupancy-bound verdict for a ~1-block/SM wgmma kernel): in both cases the fix is a smaller
-        # per-thread register/smem footprint -- to kill spills, or to fit >1 block/SM and lift
-        # occupancy.  Lowest-rung occupancy-bound lever, so it is tried before split-K / persistent.
+        # The register-reduction lever.  Reached two ways: the register-spill verdict (kill spills),
+        # and -- via the select() priority gate (2b) -- the register/occupancy-STARVED tensor-core
+        # verdict (`register-occupancy-bound`: a ~1-block/SM wgmma kernel), where a smaller
+        # register/smem footprint is the most direct way to fit >1 block/SM and lift occupancy.
         id="setmaxnreg-split-registers",
-        bottlenecks=("register-spill", "occupancy-bound"),
+        bottlenecks=("register-spill",),
         focus=("Cut register/smem pressure so more blocks fit per SM (raise occupancy) and spills "
                "vanish: add __launch_bounds__, split consumer warpgroups with setmaxnreg, shrink "
                "live register tiles / per-thread accumulator footprint, move O out of registers "
@@ -452,9 +452,23 @@ class LeverController:
             if uses_tma is False and not self.is_exhausted("tma-load"):
                 return _BY_ID["tma-load"]
 
+        # (2b) register/occupancy-STARVED tensor cores: a wgmma kernel pinned to ~1 block/SM (e.g.
+        # 250 regs -> ~12% occupancy) is gated by its register/smem footprint, so attack registers
+        # FIRST and persistently -- the most direct lever for THIS kernel -- before exploring the
+        # breadth-first occupancy pool (split-K / persistent / clusters).  Breadth-first would
+        # otherwise defer register reduction behind the untried occupancy levers (least-tried-first)
+        # whenever it has any prior try.  Once it stops paying off (exhausts), fall through to (3),
+        # which treats register-occupancy-bound as a plain occupancy case (split-K / persistent / ...).
+        if (label == "register-occupancy-bound"
+                and not self.is_exhausted("setmaxnreg-split-registers")):
+            return _BY_ID["setmaxnreg-split-registers"]
+
         # (3) matching lever, STRUCTURAL-first; explore structural levers breadth-first.
         if label:
-            matches = [lv for lv in CATALOG if label in lv.bottlenecks
+            # register-occupancy-bound shares the occupancy-bound lever pool once register reduction
+            # (handled by gate 2b above) is exhausted.
+            pool_label = "occupancy-bound" if label == "register-occupancy-bound" else label
+            matches = [lv for lv in CATALOG if pool_label in lv.bottlenecks
                        and not self.is_exhausted(lv.id)]
             if matches:
                 structural = [lv for lv in matches if lv.kind == STRUCTURAL]

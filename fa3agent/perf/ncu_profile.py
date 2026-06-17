@@ -370,7 +370,10 @@ def _classify(action, uses_wgmma: Optional[bool] = None) -> tuple[str, str, str,
     # lever is shrinking the per-thread register/smem footprint so >1 block fits per SM.
     if (tensor_present and tensor < 50.0 and dram_pct < 60.0 and occ_starved
             and (lsb + wait) > 30.0):
-        label = "occupancy-bound"
+        # Distinct from the generic (decode small-grid) occupancy-bound verdict below: this kernel
+        # has tensor cores but is pinned to ~1 block/SM by its register/smem footprint, so the
+        # lever controller attacks registers FIRST (not split-K) -- see levers.select() gate (2b).
+        label = "register-occupancy-bound"
         bn = (f"Register/occupancy-starved tensor cores: wgmma in use (pipe {_fmt(tensor, 2)}% "
               f"active) but only {_fmt(occ)}% occupancy (waves/SM {_fmt(waves, 3)}) -> too few "
               f"resident warps to hide latency, so {_fmt(lsb + wait)}% of cycles stall on the "
