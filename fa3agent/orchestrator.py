@@ -282,6 +282,26 @@ class Orchestrator:
     def _ns(self, step: int) -> str:
         return f"{C.DISTILL_NAMESPACE}_s{step:03d}"
 
+    def _brain_env(self, cid: str) -> dict:
+        """Environment handed to the headless brain: its isolated Claude config dir (F5) PLUS the
+        FA3_TRIAL_* context the in-loop `fa3agent.trial` tool reads (Workstream A).  With these set,
+        the brain can build + correctness-check + benchmark a candidate ITSELF during the step (the
+        same pipeline the driver uses) and iterate before committing.  GPUs are free here -- the
+        orchestrator is blocked on the brain subprocess for the whole generation -- so the trial may
+        use the entire pool.  Trial builds land in a per-step scratch dir under the step build dir."""
+        env = {"CLAUDE_CONFIG_DIR": self._brain_claude_dir}
+        if C.TRIAL_IN_LOOP:
+            env.update({
+                "FA3_TRIAL_CONFIG_SET": self.config_set,
+                "FA3_TRIAL_SEED": str(self.seed),
+                "FA3_TRIAL_GPUS": ",".join(str(g) for g in self.pool.gpu_ids),
+                "FA3_TRIAL_SCRATCH": os.path.join(checkpoint.build_dir(self.run_id, cid), "trials"),
+            })
+            champ = getattr(self, "_best_min_ratio", -1.0)
+            if champ is not None and champ >= 0:
+                env["FA3_TRIAL_CHAMPION_MIN"] = f"{champ:.4f}"
+        return env
+
     def _profile_subprocess(self, so_path: str, ns: str, cfg_name: str, gpu: int,
                             uses_wgmma: Optional[bool] = None) -> dict:
         """Run NCU profiling in a torch-free subprocess (ncu_report + torch segfault together).
@@ -426,7 +446,7 @@ class Orchestrator:
         res = llm.run_claude(prompt, cwd=C.REPO_ROOT, model=self.model, effort=self.effort,
                              session_id=session_id, stream_log=brain_log,
                              allowed_dirs=[self.paths["run"]],
-                             env_extra={"CLAUDE_CONFIG_DIR": self._brain_claude_dir})
+                             env_extra=self._brain_env(cid))
         dt = time.time() - t0
         # Per-step audit of the brain's I/O: the FULL prompt/context it was given + what it
         # returned, written to builds/stepNNN/prompt.log (the live token stream stays in the
@@ -670,7 +690,7 @@ class Orchestrator:
         res = llm.run_claude(prompt, cwd=C.REPO_ROOT, model=self.model, effort=self.effort,
                              session_id=sid, stream_log=brain_log,
                              allowed_dirs=[self.paths["run"]],
-                             env_extra={"CLAUDE_CONFIG_DIR": self._brain_claude_dir})
+                             env_extra=self._brain_env(cid))
         dt = time.time() - t0
         runlog.record("prompt", label=f"complete[{cid}#{attempt}]",
                       note=f"completion follow-up; transcript -> {brain_log}",
@@ -957,7 +977,12 @@ class Orchestrator:
         # E1: record a causal lesson as the knowledge note (replaces the old "Correct candidate.
         # min_ratio=..." boilerplate).  `promoted` here is PROVISIONAL (the cost-tier gates in run()
         # can still demote a correct candidate); run() re-authors the final lesson into MEMORY.md.
-        promoted = bool(ev.correct and rec.eval and promotion.meets_promotion_bar(
+        # Under STRICT_PROGRESS (accounting fix C) the provisional "promoted" note must match run()'s
+        # real-improvement test, not the looser bar -- otherwise a within-noise hold reads "PROMOTED"
+        # in the in-step note while run() correctly treats it as no-progress.
+        _progress = (promotion.is_real_improvement if C.PROMOTION_STRICT_PROGRESS
+                     else promotion.meets_promotion_bar)
+        promoted = bool(ev.correct and rec.eval and _progress(
             promotion.objective_score(rec.eval, C.PROMOTION_OBJECTIVE), self._champ_score))
         _, note = self._causal_lesson(rec, champ_before, promoted)
         self._distill(rec, note, ntype=("pf" if ev.correct else "ks"))
@@ -1236,6 +1261,21 @@ class Orchestrator:
         score = promotion.objective_score(rec.eval, C.PROMOTION_OBJECTIVE)
         return promotion.meets_promotion_bar(score, self._champ_score)
 
+    def _candidate_is_champion_dup(self, rec: StepRecord) -> bool:
+        """True iff this step's candidate .cu is byte-identical to the CURRENT champion best.cu
+        (the brain re-emitted the champion unchanged -- a 'hold').  Promotion for this step hasn't
+        happened yet, so best.cu still holds the prior champion; a match means zero real change.
+        Used by the accounting fix (C) to refuse re-promoting / counting such a no-op as progress."""
+        try:
+            cand = os.path.join(self.paths["candidates"], f"{rec.cid}.cu")
+            champ = self.paths["best"]
+            if not (os.path.exists(cand) and os.path.exists(champ)):
+                return False
+            with open(cand, "rb") as a, open(champ, "rb") as b:
+                return a.read() == b.read()
+        except OSError:
+            return False
+
     def _persist_step(self, rec: StepRecord):
         """Common per-step tail: append the record, mirror the workdir to the archive (F3), replot."""
         checkpoint.append_step(self.run_id, rec)
@@ -1358,13 +1398,33 @@ class Orchestrator:
                 rec = StepRecord(step=step, cid=f"step{step:03d}", parent=None, status="error",
                                  knowledge_note=str(e)[:300])
 
+            # ---- accounting (Workstream C): REAL improvement vs HOLD ---------------------------
+            # Decide ONCE, up front, whether this candidate is genuine progress.  A byte-identical
+            # re-emit of the champion, or a "win" that sits inside the measurement-noise band, is NOT
+            # progress -- counting either as a promotion reset the stall/plateau counters, ratcheted
+            # the min bar on noise, and marked the lever "landed", so the agent coasted (re-promoting
+            # the same kernel every step while the plateau detector stayed silent and the rewrite
+            # branch never opened -- the "defeatist hold").  Only a real improvement runs the
+            # expensive faithful gates below and promotes; everything else is a HOLD that flows into
+            # the non-promotion accounting so STUCK fires.  FA3_PROMOTION_STRICT_PROGRESS=0 restores
+            # the legacy "any bar-clear is progress" behavior.
+            champ_identical = self._candidate_is_champion_dup(rec)
+            if C.PROMOTION_STRICT_PROGRESS:
+                real_improve = bool(
+                    rec.status == "correct" and rec.eval is not None
+                    and (best is None or (not champ_identical and promotion.is_real_improvement(
+                        promotion.objective_score(rec.eval, C.PROMOTION_OBJECTIVE), self._champ_score))))
+            else:
+                real_improve = self._is_promo_candidate(rec)
+                champ_identical = False
+
             # ---- CUDA-graph compatibility gate (binary) ----
             # vLLM captures the FA3 op in a FULL CUDA graph for steady-state decode, so a candidate
             # that can't be captured -- or diverges on replay -- is not a valid drop-in even when it
             # is correct + fast EAGERLY.  Every other gate runs eager and misses this.  Run it for a
             # correct promotion candidate; a real (non-skip) failure blocks promotion and is fed back.
             if rec.status == "correct" and rec.eval and self.comp.get("check_cuda_graph"):
-                if self._is_promo_candidate(rec):
+                if real_improve:   # only verify a genuine improvement (a hold is the champion, already gated)
                     so = (rec.build or {}).get("so_path"); ns = self._built_ns(rec) or self._ns(rec.step)
                     if so:
                         gpu = self.pool.gpu_ids[0]
@@ -1388,7 +1448,7 @@ class Orchestrator:
             #         the perf target -- the final acceptance gate for the residual near-tie risk).
             if self.do_decode_equiv and rec.status == "correct" and rec.eval:
                 mr = rec.eval.get("min_ratio", 0.0)
-                promo_cand = self._is_promo_candidate(rec)
+                promo_cand = real_improve   # only verify a genuine improvement (holds skip the gates)
                 so = (rec.build or {}).get("so_path"); ns = self._built_ns(rec) or self._ns(rec.step)
                 if promo_cand and so and self.comp.get("check_insitu"):
                     gpu = self.pool.gpu_ids[0]
@@ -1406,10 +1466,14 @@ class Orchestrator:
                         rec.eval["decode_equiv_ok"] = ok; rec.eval["decode_equiv_note"] = note
                         self._log(f"[decode_equiv] ok={ok}: {note}")
 
-            # promotion (C1): first correct candidate, or one that clears the bar under the active
-            # objective (min_ratio ratchet, or weighted-geomean match-or-improve with non-monotone base)
+            # promotion (C1) + accounting (C): ONLY a real improvement (decided up front, and still
+            # correct after the faithful gates) promotes and counts as progress.  A correct candidate
+            # that merely clears the noise band -- a byte-identical re-emit or a within-noise "win" --
+            # is a HOLD: keep the champion and fall through to the non-promotion accounting
+            # (rejects++/stall++) so the plateau detector + rewrite branch actually fire instead of
+            # the agent coasting on re-promoted holds.
             improved = False
-            if self._is_promo_candidate(rec):
+            if real_improve and rec.status == "correct":   # gates above may have demoted to *_fail
                 mr = rec.eval.get("min_ratio", 0.0)
                 score = promotion.objective_score(rec.eval, C.PROMOTION_OBJECTIVE)
                 rec.is_best = True
@@ -1426,6 +1490,13 @@ class Orchestrator:
                 self._log(f"[promote] {rec.cid} -> champion (objective={C.PROMOTION_OBJECTIVE} "
                           f"score={score:.3f}; min_ratio={mr:.3f}, "
                           f"F={rec.eval.get('weighted_geomean_ratio', 0.0):.3f})")
+            elif rec.status == "correct" and rec.eval and self._is_promo_candidate(rec):
+                # cleared the bar (a promotable tie) but NOT a real improvement -> a HOLD, not progress.
+                why = ("byte-identical re-emit of the champion" if champ_identical
+                       else "within measurement noise (no gain beyond the band)")
+                self._log(f"[hold] {rec.cid} is correct and clears the bar but is {why} "
+                          f"(min_ratio={rec.eval.get('min_ratio', 0.0):.3f} vs champ_score "
+                          f"{self._champ_score:.3f}) -> NOT promoted, counted as no-progress")
 
             # E1/E2: author the FINAL causal lesson for this step + refresh persisted MEMORY.md
             # (before the F3 mirror, so the up-to-date memory lands in the durable archive too).

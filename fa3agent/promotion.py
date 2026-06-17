@@ -77,6 +77,38 @@ def meets_promotion_bar(score: float, champ_score: Optional[float],
     return score >= champ_score - band
 
 
+def is_real_improvement(score: float, champ_score: Optional[float],
+                        objective: Optional[str] = None,
+                        noise_band: Optional[float] = None,
+                        f_rel_tol: Optional[float] = None) -> bool:
+    """STRICT progress test (accounting fix C): does `score` beat the champion by MORE than the
+    measurement-noise band?
+
+    This is the deliberately stricter sibling of `meets_promotion_bar`.  `meets_promotion_bar`
+    answers "may this candidate become / stay the champion?" and treats anything within the band as
+    a promotable TIE (so a lateral refactor can land).  `is_real_improvement` answers "is this
+    genuine PROGRESS?" -- the thing that should reset the stall counter, ratchet the bar, mark the
+    lever landed, and extend the champion-F series.  A within-noise "win" (or a byte-identical
+    re-emit) is a tie, NOT progress; counting it as progress is exactly what let the agent coast.
+
+    No champion yet (None / negative) is always a real improvement (it establishes the baseline).
+    Under "weighted_geomean": strictly beat the champion F by more than the relative tolerance.
+    Under "min": strictly exceed the champion score by more than the relative noise band
+    (`band = max(FLOOR, REL * champ_score)`, mirroring `meets_promotion_bar`).
+    """
+    objective = objective or C.PROMOTION_OBJECTIVE
+    if champ_score is None or champ_score < 0:
+        return True
+    if objective == "weighted_geomean":
+        tol = C.PROMOTION_F_REL_TOL if f_rel_tol is None else f_rel_tol
+        return score > champ_score * (1.0 + tol)
+    if noise_band is None:
+        band = max(C.PROMOTION_MIN_BAND_FLOOR, C.PROMOTION_MIN_REL_TOL * max(champ_score, 0.0))
+    else:
+        band = noise_band
+    return score > champ_score + band
+
+
 def next_champ_score(prev: Optional[float], score: float,
                      objective: Optional[str] = None) -> float:
     """Champion score after a promotion.  "min": monotone max() ratchet (never drops the bar).

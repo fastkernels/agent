@@ -97,10 +97,11 @@ def init_run(run_id: str, meta: dict, resume: bool = False) -> dict:
 
 # --------------------------------------------------------------------------------------
 # Mirror the live workdir -> durable archive (F3).  Incremental: only new/changed files are
-# copied, so per-step mirroring stays cheap.  The brain's per-run Claude config (.claude) and
+# copied, so per-step mirroring stays cheap.  The brain's per-run Claude config (.claude), the
+# brain's throwaway in-loop `trials/` build scratch (Workstream A -- never authoritative), and
 # volatile ncu scratch are excluded; built .so files are included unless ARCHIVE_INCLUDE_SO is off.
 # --------------------------------------------------------------------------------------
-_MIRROR_EXCLUDE_DIRS = {".claude", "ncu_home"}
+_MIRROR_EXCLUDE_DIRS = {".claude", "ncu_home", "trials"}
 
 
 def _is_excluded_dir(name: str) -> bool:

@@ -69,9 +69,49 @@ DISTILLED info, not dumps):
 - Sanitizer (after you build a .so to test): a BOUNDED compute-sanitizer wrapper — prefer it over raw
   compute-sanitizer (returns {clean, num_errors, errors[<=5]}, not the raw dump):
     python -c "from fa3agent.verify.sanitizer import run_sanitizer; from fa3agent import config as C; print(run_sanitizer('<built.so>', '<namespace>', C.DEV_CONFIGS[2], tool='memcheck'))"
-Do NOT run the build or the eval yourself — the driver compiles, anti-cheat-scans, checks
-CORRECTNESS FIRST, then profiles, and feeds you distilled results next round.
 """
+
+
+def workflow_block(candidate_path: str, bootstrap: bool = False) -> str:
+    """The closing instructions: either the in-loop TRIAL workflow (C.TRIAL_IN_LOOP, default) or the
+    legacy write-one-blind-candidate-then-STOP contract.  In-loop, the brain compiles + tests +
+    benchmarks the candidate ITSELF and iterates before committing -- the AVO/K-Search local-
+    refinement step -- which is what lets it land a risky structural rewrite (build it, see it
+    regress one config, fix it) instead of fearing a blind commit that could lose the champion."""
+    if not C.TRIAL_IN_LOOP:
+        legacy_stop = ("Then STOP. The driver will build + anti-cheat + verify correctness "
+                       + ("" if bootstrap else "+ profile ") + "and report back.")
+        return (f"WRITE the candidate to EXACTLY this path (overwrite):\n  {candidate_path}\n"
+                f"{legacy_stop}\n"
+                "Do NOT run the build or the eval yourself — the driver does it next round.")
+    k = C.TRIAL_STAGNATION_LIMIT
+    goal = ("BUILDS and is CORRECT on every config (this is the bootstrap goal — do not chase speed yet)"
+            if bootstrap else
+            "BUILDS, is CORRECT on every config, AND raises the MINIMUM speedup ratio over the champion")
+    return f"""\
+WORKFLOW — ITERATE, do NOT write blind. You have the build + evaluator as a tool this round; use it.
+1. Edit the candidate at {candidate_path}.
+2. TRIAL it yourself (the SAME build/correctness/perf pipeline the driver uses):
+     python -m fa3agent.trial {candidate_path}
+   It prints a one-line summary + a `TRIAL_JSON: {{...}}` verdict: whether it built (else the compile
+   error), whether every config is correct (else which configs failed + why), the per-config + min /
+   geomean speedup ratios vs the FA3 baseline, and the SASS instruction mix (wgmma/TMA present?
+   register spills?). Flags: `--no-perf` (build+correctness only — fast, use while fixing a
+   compile/correctness bug), `--profile` (also attach the NCU bottleneck for the worst config),
+   `--configs a,b` (restrict to a subset for faster iteration). Each call is isolated (its own build
+   + namespace); run it as many times as useful.
+3. READ the verdict and DIAGNOSE. If it did not build, is incorrect on any config, or did not improve
+   the min ratio, go back to 1 and fix the specific problem the verdict points to (use the docs/SASS
+   tools above to ground the fix).
+4. Repeat until the candidate {goal} — or until ~{k} consecutive trials yield no improvement, in
+   which case keep your BEST correct version and stop (don't burn the whole budget on a dead end;
+   a correct kernel that ties the champion beats one that is broken or doesn't build). For a risky
+   structural rewrite, trial early and often so a regression on one config is something you FIX, not
+   a reason to abandon the rewrite.
+
+The file you leave at {candidate_path} is what gets committed; the driver then re-runs the
+AUTHORITATIVE eval (correctness + perf + the faithful vLLM gates) on it. STOP once the candidate is
+correct and you've improved it as far as this round's trials show (or you've stagnated)."""
 
 
 def bootstrap_prompt(candidate_path: str, config_names: list[str]) -> str:
@@ -91,9 +131,7 @@ NOT chase performance yet — a correct slow kernel is the required foundation.
 
 {TOOLS}
 
-WRITE your candidate to EXACTLY this path (overwrite if present):
-  {candidate_path}
-Then STOP. The driver will build + anti-cheat-scan + verify correctness and report back.
+{workflow_block(candidate_path, bootstrap=True)}
 """
 
 
@@ -153,9 +191,7 @@ SUGGESTED FOCUS: {focus}
 
 {TOOLS}
 
-WRITE the improved candidate to EXACTLY this path (overwrite):
-  {candidate_path}
-Then STOP. The driver will build + anti-cheat + verify correctness + profile and report back.
+{workflow_block(candidate_path, bootstrap=False)}
 """
 
 
@@ -200,8 +236,7 @@ FINISH IT IN PLACE — do NOT start over and do NOT revert to the previous appro
    fallback — AND every config stays correct. If the build failed, fix the compile error; if a
    config is numerically wrong, fix it; if the instruction class is absent from SASS, make the
    REAL (taken) code path use it.
-3. You may build the .so and inspect SASS yourself (fa3agent.sass.analyze.analyze) to CONFIRM the
-   instruction class is present before you finish — optional but encouraged.
+3. {("TRIAL it yourself before you finish: `python -m fa3agent.trial " + candidate_path + "` — confirm it BUILDS, is CORRECT on every config, and that the instruction class now shows up in the SASS verdict. Iterate until it does." ) if C.TRIAL_IN_LOOP else "You may build the .so and inspect SASS yourself (fa3agent.sass.analyze.analyze) to CONFIRM the instruction class is present before you finish — optional but encouraged."}
 
 {CONTRACT}
 
@@ -209,9 +244,7 @@ FINISH IT IN PLACE — do NOT start over and do NOT revert to the previous appro
 
 {TOOLS}
 
-WRITE the completed candidate back to EXACTLY this path (overwrite):
-  {candidate_path}
-Then STOP. The driver will rebuild + anti-cheat + verify correctness + profile and report back.
+{workflow_block(candidate_path, bootstrap=False)}
 """
 
 

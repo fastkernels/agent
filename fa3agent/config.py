@@ -178,6 +178,19 @@ HEADLESS_FAILURE_RETRIES = 1
 COMPLETION_GATE = os.environ.get("FA3_COMPLETION_GATE", "1") not in ("0", "false", "False")
 MAX_COMPLETION_ATTEMPTS = int(os.environ.get("FA3_MAX_COMPLETION_ATTEMPTS", "3"))
 
+# In-loop TRIAL tool (Workstream A: AVO / K-Search-style local refinement).  When enabled, the
+# brain is FREED from the "don't build" contract and handed `fa3agent.trial` as a tool: it compiles
+# + correctness-checks + benchmarks (+optionally NCU-profiles) a candidate IN PLACE during a step --
+# the SAME build/verify/measure path the driver uses -- so it can iterate edit->trial->diagnose
+# until the kernel builds, is correct on every config, and raises the min ratio over the champion,
+# instead of writing ONE blind candidate per step (the old EVO-style "LLM = single-shot generator"
+# that left the brain unable to test a risky structural rewrite before committing it).  The driver
+# still re-runs the AUTHORITATIVE eval on whatever file the brain leaves behind -- the trials are
+# throwaway scratch.  TRIAL_STAGNATION_LIMIT is the K we tell the brain to stop after (consecutive
+# trials with no improvement), mirroring K-Search's local-refinement stagnation bound.
+TRIAL_IN_LOOP = os.environ.get("FA3_TRIAL_IN_LOOP", "1") not in ("0", "false", "False")
+TRIAL_STAGNATION_LIMIT = int(os.environ.get("FA3_TRIAL_STAGNATION_LIMIT", "4"))
+
 
 # Toolkit-only nvcc flags (NO cutlass/cute include path -> anti-cheat by construction).
 NVCC_BASE_FLAGS = [
@@ -435,6 +448,17 @@ PROMOTION_F_REL_TOL = float(os.environ.get("FA3_PROMOTION_F_REL_TOL", "0.01"))
 # meaningful at every scale while still absorbing true measurement noise / lateral refactors.
 PROMOTION_MIN_REL_TOL = float(os.environ.get("FA3_PROMOTION_MIN_REL_TOL", "0.03"))
 PROMOTION_MIN_BAND_FLOOR = float(os.environ.get("FA3_PROMOTION_MIN_BAND_FLOOR", "0.001"))
+# Accounting fix (Workstream C): a within-noise promotion is NOT progress.  `meets_promotion_bar`
+# treats a candidate within the noise band as a promotable TIE (so a lateral refactor can land) --
+# but the run loop also used that same bar to decide `improved`, which reset the stall, ratcheted
+# the bar, marked the lever "landed", and extended the champion-F series.  So a byte-identical
+# re-emit (or a +-noise "win") looked like progress every step: the plateau detector stayed silent
+# and the rewrite branch never opened (the "defeatist hold" coast).  With STRICT_PROGRESS on
+# (default) the loop counts a candidate as a real improvement -- the thing that promotes, resets the
+# stall, and ratchets the bar -- ONLY if it beats the champion by MORE than the noise band AND is
+# not byte-identical to the champion; everything else is a HOLD that flows into the non-promotion
+# accounting so STUCK fires.  Set FA3_PROMOTION_STRICT_PROGRESS=0 to restore the legacy behavior.
+PROMOTION_STRICT_PROGRESS = os.environ.get("FA3_PROMOTION_STRICT_PROGRESS", "1") not in ("0", "false", "False")
 
 # --------------------------------------------------------------------------------------
 # Plateau detection + protected rewrite branch (C2/C2b).  A SHARED PlateauState drives both the
