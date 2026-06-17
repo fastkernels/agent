@@ -175,7 +175,13 @@ class PlateauState:
         return self.data.get("branch")
 
     def open_branch(self, anchor_cid: str, anchor_F: Optional[float], seed_cid: str,
-                    budget: int = None) -> dict:
+                    budget: int = None, focus_lever: Optional[str] = None) -> dict:
+        """Open a protected rewrite branch.
+
+        `focus_lever` (Layer 4): when set, this is a CAPABILITY branch dedicated to landing ONE
+        all-or-nothing lever (e.g. tma-load) over several steps -- every branch step uses that lever's
+        focus + completion gate (rather than the rung-0-refactor-then-walk catalog), seeded from the
+        champion so it ADDS the capability to the best kernel.  None == the generic restructure branch."""
         budget = C.BRANCH_BUDGET if budget is None else budget
         b = {
             "active": True,
@@ -184,6 +190,7 @@ class PlateauState:
             "budget": int(budget), "steps_used": 0,
             "tip_cid": seed_cid, "tip_F": None, "tip_min_ratio": None, "tip_so": None,
             "step_indices": [], "rung": 0, "escalated": False,
+            "focus_lever": focus_lever,
         }
         self.data["branch"] = b
         self._save()

@@ -30,6 +30,13 @@ MICRO = "micro"
 # After this many consecutive non-landing outcomes (no intervening land) a lever is EXHAUSTED for
 # the rest of the run and no longer suggested for its bottleneck (forces a different approach).
 LEVER_MAX_FAILS = int(os.environ.get("FA3_LEVER_MAX_FAILS", "2"))
+# A FOUNDATION lever (one with a `verify` SASS signal -- wgmma / TMA / fp8-wgmma) whose capability is
+# still ABSENT from the build did not actually get its technique tested: the brain never emitted the
+# instruction class (the completion gate handles that), so a "no_effect"/"regressed" perf verdict is
+# NOT evidence the technique fails.  Such non-implementations are tracked separately and only exhaust
+# the lever after this many in a row -- so a needed capability (e.g. TMA) is re-attempted instead of
+# being permanently locked out the first time the brain substitutes an easier path.
+LEVER_NOT_IMPL_CAP = int(os.environ.get("FA3_LEVER_NOT_IMPL_CAP", "3"))
 # |dF| <= this counts as "no effect" rather than a regression (measurement noise band).
 LEVER_NOEFFECT_EPS = float(os.environ.get("FA3_LEVER_NOEFFECT_EPS", "0.005"))
 
@@ -52,6 +59,12 @@ class Lever:
     # _GATE): when set AND the source kernel lacks the signal, the step is "introducing" it and the
     # driver verifies adoption on the built candidate before committing the step.
     verify: str = ""
+    # ALL-OR-NOTHING flag (populated from _BRANCH_DEV below): a big structural rewrite (TMA pipeline,
+    # persistent/L2 schedule, cluster multicast) that regresses-before-it-helps and so cannot land in
+    # a single trunk step under the promotion bar.  When the trunk fails to land such a capability
+    # (Layer 4), the orchestrator funds it through a dedicated, champion-seeded rewrite branch with
+    # branch-local acceptance (regressions tolerated; must stay correct) over several steps.
+    branch_dev: bool = False
 
 
 # ---- the catalog (B3 lever list == D2 transform catalog) --------------------------------------
@@ -67,17 +80,37 @@ CATALOG: list = [
         kind=STRUCTURAL,
         success="tensor-pipe %active rises above 50%",
         rung=1),
+    # FOUNDATION (split from the old conflated "tma-multistage-pipeline", Layer 3): land the TMA load
+    # PRODUCER first -- the cp.async.bulk.tensor + mbarrier transaction that feeds K/V tiles to smem.
+    # This is the gated capability (verify=uses_tma); the multistage RING that hides latency on top of
+    # it is a separate tactic below, so a "no_effect" on the ring no longer exhausts the TMA producer.
     Lever(
-        id="tma-multistage-pipeline",
+        id="tma-load",
         bottlenecks=("latency-bound", "dram-bandwidth-bound"),
-        focus=("Hide load latency with a multistage async pipeline: load K/V tiles via "
-               "cp.async.bulk.tensor (TMA) into a 2-4 stage smem ring with mbarrier transaction "
-               "barriers; keep KV resident across the score+PV passes; ensure 128B-coalesced access."),
+        focus=("Load K/V (and Q) tiles through TMA: issue cp.async.bulk.tensor.* from a CUtensorMap "
+               "descriptor into shared memory, signalled by an mbarrier with arrive.expect_tx / "
+               "try_wait, instead of LDG/cp.async.ca; ensure 128B-coalesced, swizzle-compatible "
+               "tiles.  Establish the async-copy PRODUCER (the multistage ring is a separate step)."),
+        doc_sections=[("kernel-patterns.md", "Async execution model"),
+                      ("kernel-patterns.md", "Global→shared async copy")],
+        kind=STRUCTURAL,
+        success="UTMALDG/UBLKCP present in SASS; long-scoreboard stall share drops",
+        rung=2),
+    # TACTIC (split from the old conflated lever): a 2-4 stage software pipeline OVER an existing TMA
+    # producer.  No verify signal -- it refines a path that must already have TMA (so a no_effect here
+    # is a real tactic result, not a missing capability).
+    Lever(
+        id="multistage-pipeline",
+        bottlenecks=("latency-bound", "dram-bandwidth-bound"),
+        focus=("Hide load latency with a multistage async pipeline ON TOP of the TMA load: prefetch "
+               "the next K/V tile (cp.async.bulk.tensor) into a 2-4 stage smem ring with rotating "
+               "mbarriers while the current tile is consumed by wgmma; keep KV resident across the "
+               "score+PV passes so the copy fully overlaps compute."),
         doc_sections=[("kernel-patterns.md", "Software pipelining (double buffering)"),
                       ("kernel-patterns.md", "Async execution model")],
         kind=STRUCTURAL,
         success="long-scoreboard stall share drops and DRAM %peak falls",
-        rung=2),
+        rung=3),
     Lever(
         id="fp8-wgmma-promote",
         # Reached via the fp8 FOUNDATION gate in select() (worst config is e4m3 + no QGMMA in SASS),
@@ -244,7 +277,8 @@ _FALLBACK_ORDER = [lv.id for lv in sorted(CATALOG, key=lambda l: l.rung)]
 # technique; tile-swizzle -> descriptor/swizzle, warp-spec -> warp_specialization + pipeline, etc.
 _HINTS_TOPIC = {
     "wgmma-tensorcore": "wgmma",
-    "tma-multistage-pipeline": "tma load pipeline",
+    "tma-load": "tma load",
+    "multistage-pipeline": "tma load pipeline",
     "fp8-wgmma-promote": "wgmma descriptor",
     "warp-specialize": "warp specialization pipeline",
     "ping-pong-overlap": "pipeline softmax",
@@ -269,11 +303,26 @@ for _lv in CATALOG:
 # that have no clean binary signature.  Adding a future foundation lever = one entry here.
 _VERIFY_SIGNAL = {
     "wgmma-tensorcore": "uses_wgmma",
-    "tma-multistage-pipeline": "uses_tma",
+    "tma-load": "uses_tma",
     "fp8-wgmma-promote": "uses_fp8_wgmma",
 }
 for _lv in CATALOG:
     _lv.verify = _VERIFY_SIGNAL.get(_lv.id, "")
+
+# ALL-OR-NOTHING structural rewrites (Layer 4): too big to land in one trunk step under the promotion
+# bar, so the trunk funds them through a dedicated champion-seeded rewrite branch when it can't land
+# them in-step.  Each must be a real, separable capability (the TMA producer, the persistent/L2
+# schedule, the cluster multicast) -- NOT a micro tweak.
+_BRANCH_DEV = {"tma-load", "persistent-l2-scheduling", "clusters-tma-multicast"}
+for _lv in CATALOG:
+    _lv.branch_dev = _lv.id in _BRANCH_DEV
+
+
+def is_branch_dev(lever_id: str) -> bool:
+    """True iff `lever_id` is an all-or-nothing structural rewrite the trunk should fund through a
+    protected rewrite branch (resolves aliases, so the retired combined id maps to tma-load)."""
+    lv = lever_by_id(lever_id)
+    return bool(lv and lv.branch_dev)
 
 # Human-readable name of each adoption signal, for the completion follow-up prompt (what the brain
 # must make actually appear in the built kernel).
@@ -287,8 +336,14 @@ VERIFY_LABELS = {
 }
 
 
+# Retired lever ids -> their replacement, so a pre-split lever_state.json (history + ledger entries
+# referencing "tma-multistage-pipeline") still resolves after the Layer-3 split.  The old combined
+# lever's verify signal (uses_tma) matches tma-load, so the foundation continuity is preserved.
+_ALIASES = {"tma-multistage-pipeline": "tma-load"}
+
+
 def lever_by_id(lever_id: str) -> Optional[Lever]:
-    return _BY_ID.get(lever_id)
+    return _BY_ID.get(lever_id) or _BY_ID.get(_ALIASES.get(lever_id, ""))
 
 
 class LeverController:
@@ -326,12 +381,34 @@ class LeverController:
         e = self.state["levers"].get(lever_id)
         if e is None:
             e = {"tried": 0, "landed": 0, "regressed": 0, "no_effect": 0, "failed": 0,
-                 "fail_streak": 0, "exhausted": False}
+                 "fail_streak": 0, "not_impl": 0, "not_impl_streak": 0, "exhausted": False}
             self.state["levers"][lever_id] = e
         return e
 
     def is_exhausted(self, lever_id: str) -> bool:
         return bool(self.state["levers"].get(lever_id, {}).get("exhausted"))
+
+    def reset_exhaustion(self, foundation_only: bool = True) -> list:
+        """Clear `exhausted` + the fail/not-impl streaks so a technique can be re-attempted.
+
+        A FOUNDATION capability (wgmma / TMA / fp8-wgmma) is a prerequisite, not a tactic: it must
+        never be foreclosed for the rest of a long run by a handful of early non-implementations or
+        regressions.  Called on a plateau and after a rollback so the resumed run can try it again
+        (e.g. once the brain has a better reference for the hard instruction sequence).  Returns the
+        list of lever ids that were reopened."""
+        reopened = []
+        for lid, e in self.state["levers"].items():
+            if not e.get("exhausted"):
+                continue
+            if foundation_only and not (lever_by_id(lid) and lever_by_id(lid).verify):
+                continue
+            e["exhausted"] = False
+            e["fail_streak"] = 0
+            e["not_impl_streak"] = 0
+            reopened.append(lid)
+        if reopened:
+            self._save()
+        return reopened
 
     # ---- selection --------------------------------------------------------------------
     def select(self, bottleneck_label: Optional[str], step: int,
@@ -367,8 +444,8 @@ class LeverController:
         if label in ("overlap-bound", "off-tensor-core"):
             if uses_wgmma is False and not self.is_exhausted("wgmma-tensorcore"):
                 return _BY_ID["wgmma-tensorcore"]
-            if uses_tma is False and not self.is_exhausted("tma-multistage-pipeline"):
-                return _BY_ID["tma-multistage-pipeline"]
+            if uses_tma is False and not self.is_exhausted("tma-load"):
+                return _BY_ID["tma-load"]
 
         # (3) matching lever, STRUCTURAL-first; explore structural levers breadth-first.
         if label:
@@ -387,22 +464,42 @@ class LeverController:
         return _BY_ID[open_ids[step % len(open_ids)]]
 
     # ---- outcome tracking -------------------------------------------------------------
-    def record_outcome(self, lever_id: str, outcome: str, step: Optional[int] = None):
-        """`outcome` in {landed, regressed, no_effect, failed}.  Updates the ledger + exhaustion."""
+    def record_outcome(self, lever_id: str, outcome: str, step: Optional[int] = None,
+                       adopted: Optional[bool] = None):
+        """`outcome` in {landed, regressed, no_effect, failed}.  Updates the ledger + exhaustion.
+
+        `adopted` (foundation levers only): whether the lever's `verify` instruction class actually
+        appeared in the built SASS.  When a foundation lever was selected but its capability is still
+        ABSENT (`adopted is False`), the technique never really ran -- the brain substituted an easier
+        path -- so we DON'T count it toward the normal fail-streak exhaustion (which would lock the
+        capability out the way TMA was).  Instead it counts toward a separate not-implemented streak
+        that only exhausts after LEVER_NOT_IMPL_CAP in a row.  `adopted is None` (no/unreadable SASS,
+        or a lever with no verify signal) -> normal accounting."""
         lv = lever_by_id(lever_id)
         if lv is None:
             return
         e = self._entry(lever_id)
         e["tried"] += 1
-        if outcome == "landed":
-            e["landed"] += 1
-            e["fail_streak"] = 0
+        # A foundation lever whose capability is still absent did not get a fair test of the technique.
+        not_implemented = (outcome == "not_implemented") or (bool(lv.verify) and adopted is False)
+        if not_implemented:
+            e["not_impl"] = e.get("not_impl", 0) + 1
+            e["not_impl_streak"] = e.get("not_impl_streak", 0) + 1
+            if e["not_impl_streak"] >= LEVER_NOT_IMPL_CAP:
+                e["exhausted"] = True       # the brain can't land it unaided -> stop forcing it
+            tag = "not_implemented"
         else:
-            e[outcome] = e.get(outcome, 0) + 1
-            e["fail_streak"] += 1
-            if e["fail_streak"] >= LEVER_MAX_FAILS:
-                e["exhausted"] = True
-        self.state["history"].append([step, lever_id, lv.kind, outcome])
+            e["not_impl_streak"] = 0        # capability present now -> the technique got a real test
+            if outcome == "landed":
+                e["landed"] += 1
+                e["fail_streak"] = 0
+            else:
+                e[outcome] = e.get(outcome, 0) + 1
+                e["fail_streak"] += 1
+                if e["fail_streak"] >= LEVER_MAX_FAILS:
+                    e["exhausted"] = True
+            tag = outcome
+        self.state["history"].append([step, lever_id, lv.kind, tag])
         self.state["history"] = self.state["history"][-200:]
         self._save()
 
@@ -431,6 +528,7 @@ class LeverController:
         for lid, e in self.state["levers"].items():
             if e.get("tried"):
                 tag = "EXHAUSTED" if e.get("exhausted") else "open"
+                ni = f" not_impl={e['not_impl']}" if e.get("not_impl") else ""
                 out[lid] = (f"tried={e['tried']} landed={e['landed']} regressed={e['regressed']} "
-                            f"no_effect={e['no_effect']} failed={e['failed']} [{tag}]")
+                            f"no_effect={e['no_effect']} failed={e['failed']}{ni} [{tag}]")
         return out

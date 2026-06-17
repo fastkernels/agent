@@ -173,6 +173,36 @@ def main() -> int:
     else:
         failures += _fail("branch prompt wiring missing")
 
+    # ---- (6) Layer 4: capability branch carries a focus_lever (champion-seeded, multi-step fund) ----
+    print("[6] Layer 4: capability branch records focus_lever + branch-local acceptance + persist")
+    with tempfile.TemporaryDirectory() as d:
+        ps = PlateauState(d)
+        ps.on_promotion(30, "step030", F=0.40, loc=1500)
+        ps.on_nonpromotion(); ps.on_nonpromotion(); ps.on_nonpromotion()
+        # champion-seeded capability branch dedicated to landing tma-load
+        b = ps.open_branch(anchor_cid="step030", anchor_F=0.40, seed_cid="step030",
+                           budget=4, focus_lever="tma-load")
+        opened = ps.branch_active() and ps.branch.get("focus_lever") == "tma-load" \
+            and ps.branch.get("seed_cid") == "step030"
+        # a correct TMA candidate that REGRESSES perf is still accepted as the branch tip (branch-local)
+        ps.record_branch_step(31, "step031", correct=True, F=0.36, min_ratio=0.2, so_path="/x/31.so")
+        tip_local = ps.branch["tip_cid"] == "step031"           # below champion F, still the tip
+        # at budget end, a tip within tol of the champion adopts (brings TMA into the trunk)
+        ps.record_branch_step(32, "step032", correct=True, F=0.399, min_ratio=0.3, so_path="/x/32.so")
+        adopt_close = ps.decide_adopt(gate_ok=True)             # 0.399 >= 0.40*0.99=0.396 -> adopt
+        reloaded_focus = None
+        ps.close_branch(adopted=adopt_close, note="cap")
+        # focus_lever must survive into the persisted branch_log
+        reloaded = PlateauState(d)
+        if reloaded.data["branch_log"]:
+            reloaded_focus = reloaded.data["branch_log"][-1].get("focus_lever")
+        if opened and tip_local and adopt_close and reloaded_focus == "tma-load":
+            _ok("capability branch: focus_lever set; regressing-but-correct tip accepted; "
+                "within-tol tip adopts; focus_lever persisted")
+        else:
+            failures += _fail(f"capability branch wrong: opened={opened} tip_local={tip_local} "
+                              f"adopt={adopt_close} reloaded_focus={reloaded_focus}")
+
     print()
     print("SMOKE: PASS (plateau + branch)" if failures == 0 else f"SMOKE: FAIL ({failures})")
     return failures

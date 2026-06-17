@@ -97,6 +97,14 @@ def cmd_run(a):
                         decode_tokens=a.decode_tokens, do_decode_equiv=not a.no_decode_equiv,
                         profile_enabled=not a.no_profile, resume=a.resume)
 
+    # On a resume, scrub the leftovers of a step that was started but never persisted (e.g. a build
+    # killed mid-flight leaves a torch FileBaton `lock` that would make the rebuild hang forever).
+    # Delete-only (no archive); cross-step state is untouched.  Done after the orchestrator restored
+    # the workdir but BEFORE the run.log tee opens a handle, so the run.log tail truncation is clean.
+    if a.resume:
+        from . import rollback as RB
+        RB.purge_incomplete_tail(run_id)
+
     # Tee the whole run narrative into <workdir>/run.log so the live progress log lives inside the
     # live run folder (what `tail -f .../run_*/run.log` expects), in addition to whatever the
     # launcher does with stdout.  Best-effort: never let logging-setup break the run.

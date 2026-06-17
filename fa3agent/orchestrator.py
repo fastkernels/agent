@@ -225,6 +225,10 @@ class Orchestrator:
         # B3: bottleneck-driven lever selection + persisted per-lever outcome ledger (lever_state.json
         # in the workdir, mirrored to the archive); replaces the old step%5 focus rotation.
         self._levers = LeverController(self.paths["run"])
+        # CUTLASS->PTX oracle: a concrete Hopper reference (wgmma+TMA instruction sequence) built
+        # ONCE out-of-band and reused by the completion gate when a foundation capability is still
+        # missing.  Cached per (signal, head_dim) so it never rebuilds inside the per-step loop.
+        self._oracle_refs: dict = {}
         # C2: shared plateau/branch state (champ_history + STUCK + knee + rewrite-branch FSM),
         # persisted in branches.json (workdir, mirrored).  Drives the protected rewrite branch.
         self._plateau = PlateauState(self.paths["run"])
@@ -257,6 +261,7 @@ class Orchestrator:
         # NCU profiling runs OUT-OF-PROCESS (see _profile_subprocess): ncu_report + torch
         # segfault if co-imported, and this process loads torch via build/correctness/perf.
         grab("sass_analyze", "fa3agent.sass.analyze", "analyze")
+        grab("build_oracle", "fa3agent.sass.cutlass_oracle", "build_oracle")
         grab("update_plot", "fa3agent.plot.evolution", "update_plot")
         grab("get_hints", "fa3agent.reflib.hints", "get_hints")
         grab("retrieve", "fa3agent.docs.retrieve", "retrieve")
@@ -612,8 +617,42 @@ class Orchestrator:
             self._log(f"[completion] correctness check raised: {e!r}")
             return None
 
+    def _oracle_cfg(self):
+        """Representative config for the oracle build (drives the wgmma N-tile via head_dim).  Prefer
+        a head_dim=128 config (the dominant decode/prefill shape); else the first available config."""
+        for c in (self.cfgs or []):
+            if getattr(c, "head_dim", None) == 128:
+                return c
+        return (self.cfgs or [None])[0]
+
+    def _oracle_ptx_ref(self, want: str) -> str:
+        """A literal Hopper PTX reference for a still-MISSING instruction class (uses_tma /
+        uses_wgmma / uses_fp8_wgmma), sliced from a CUTLASS / inline oracle built ONCE out of band.
+
+        This is the concrete sequence (descriptor + mbarrier expect_tx + cp.async.bulk.tensor +
+        wgmma.fence + wgmma.mma_async + commit/wait, in order) the brain should MIRROR -- handed to it
+        by the completion gate exactly when the gate proves the capability is absent.  Cached per
+        head_dim so it never rebuilds inside the per-step loop; '' when no oracle is available."""
+        builder = self.comp.get("build_oracle")
+        if not builder or not want:
+            return ""
+        cfg = self._oracle_cfg()
+        key = getattr(cfg, "head_dim", 128)
+        if key not in self._oracle_refs:
+            wd = os.path.join(self.paths["run"], "builds", "_oracle")
+            try:
+                res = builder(cfg, wd)
+                ref = res.get("ptx_ref") or ""
+                self._oracle_refs[key] = ref
+                self._log(f"[oracle] tier={res.get('oracle')} hd={key} "
+                          f"ptx_ref={'yes' if ref else 'no'}: {(res.get('note') or '')[:80]}")
+            except Exception as e:  # noqa - best-effort, never crash a step
+                self._oracle_refs[key] = ""
+                self._log(f"[oracle] build failed: {e!r}")
+        return self._oracle_refs.get(key, "")
+
     def _complete_followup(self, cid: str, cand_path: str, lever, want: str, gaps: list,
-                           session_id: Optional[str], attempt: int) -> Optional[str]:
+                           session_id: Optional[str], attempt: int, ptx_ref: str = "") -> Optional[str]:
         """Re-engage the brain to FINISH an incomplete introducing-step before it is committed.
 
         By default a FRESH session (the relay chokes on real `--resume`, see HEADLESS_RESUME_SESSION)
@@ -622,7 +661,7 @@ class Orchestrator:
         is resumed for true continuity.  Returns the (possibly new) session id."""
         technique = levers.VERIFY_LABELS.get(want, want)
         focus = lever.focus if lever else ""
-        prompt = prompts.completion_followup(cand_path, focus, technique, gaps)
+        prompt = prompts.completion_followup(cand_path, focus, technique, gaps, ptx_ref=ptx_ref)
         brain_log = os.path.join(checkpoint.build_dir(self.run_id, cid), f"brain_complete{attempt}.log")
         sid = session_id if C.HEADLESS_RESUME_SESSION else None
         self._log(f"[completion] invoking brain ({self.model}, effort={self.effort}) "
@@ -663,7 +702,20 @@ class Orchestrator:
             # Inside the protected branch: rung-0 is a behavior-preserving refactor (D1); later
             # rungs walk the transform catalog keyed by the branch bottleneck (D2).
             rung = branch.get("rung", 0)
-            if rung == 0 and not branch.get("escalated"):
+            focus_lever = branch.get("focus_lever")
+            if focus_lever:
+                # Layer 4 CAPABILITY branch: every step develops the SAME all-or-nothing lever (e.g.
+                # tma-load) with the completion gate + oracle, seeded from the champion.  Bypasses the
+                # rung-0 refactor + catalog walk so the budget is spent landing the one capability.
+                lever = levers.lever_by_id(focus_lever)
+                lever_id = focus_lever
+                src = prev if (isinstance(prev, dict) and prev.get("sass")) else best
+                src_rec = src
+                focus = (f"{lever.focus}  [NCU success criterion: {lever.success}]" if lever
+                         else prompts.BRANCH_REFACTOR_FOCUS)
+                self._log(f"[branch] capability-dev rung {rung}: focus_lever={focus_lever} "
+                          f"({lever.kind if lever else '?'})")
+            elif rung == 0 and not branch.get("escalated"):
                 focus = prompts.BRANCH_REFACTOR_FOCUS
                 lever_id = "refactor-rung0"
                 self._log(f"[branch] rung 0 refactor (seed {branch.get('seed_cid')})")
@@ -745,10 +797,12 @@ class Orchestrator:
             # What is still missing for this step to have fully/correctly landed its functionality?
             gaps: list[str] = []
             cres = None
+            instr_missing = False
             if phase == "build_failed":
                 gaps.append(f"BUILD FAILED — the new code does not compile: {(br.error if br else '')[:350]}")
             else:  # built ok
                 if not _sass_has(rec.sass, want):
+                    instr_missing = True
                     gaps.append(f"{levers.VERIFY_LABELS.get(want, want)} — but SASS shows it is NOT "
                                 f"present, so the intended path was not actually taken")
                 cres = self._check_correctness_only(ns_try)
@@ -765,9 +819,15 @@ class Orchestrator:
                           f"attempt(s); committing as-is. gaps={gaps}")
                 break
             attempt += 1
+            # When the instruction class is genuinely absent from the SASS, hand the brain a concrete
+            # Hopper PTX reference (CUTLASS/inline oracle) for the exact wgmma/TMA sequence it must
+            # emit -- this is the support the brain lacked when it kept planning TMA but never wrote it.
+            ptx_ref = self._oracle_ptx_ref(want) if instr_missing else ""
             self._log(f"[completion] attempt {attempt}/{C.MAX_COMPLETION_ATTEMPTS}: re-engaging brain "
-                      f"to finish '{lever.id}'. gaps={gaps}")
-            session_id = self._complete_followup(cid, cand_path, lever, want, gaps, session_id, attempt)
+                      f"to finish '{lever.id}'. gaps={gaps}"
+                      + ("  [+oracle PTX ref]" if ptx_ref else ""))
+            session_id = self._complete_followup(cid, cand_path, lever, want, gaps, session_id,
+                                                 attempt, ptx_ref=ptx_ref)
             rec.session_id = session_id
             rec.completion_attempts = attempt
             if not os.path.exists(cand_path):
@@ -845,6 +905,13 @@ class Orchestrator:
         prior_bn = (champ.get("profile", {}) or {}).get("bottleneck", "") or ""
 
         change = "initial seed kernel" if not champ_before else f"applied: {focus}"
+        # Honest accounting (Layer 5): annotate with the MEASURED adoption so memory reflects what the
+        # build actually did, not the lever's intent -- otherwise a step that "applied ... TMA" but
+        # emitted zero UTMALDG gets recorded as success and the brain believes TMA is already done.
+        lv = levers.lever_by_id(rec.lever_id) if getattr(rec, "lever_id", None) else None
+        if champ_before and lv is not None and lv.verify:
+            adopted = _sass_has(rec.sass_hot, lv.verify) or _sass_has(rec.sass, lv.verify)
+            change += f"  [SASS: {lv.verify} {'present' if adopted else 'STILL ABSENT'}]"
         hypothesis = (f"relieve prior bottleneck: {prior_bn}" if prior_bn
                       else "establish a correct, faster baseline")
         status = rec.status
@@ -907,7 +974,20 @@ class Orchestrator:
                     dF = (rec.eval.get("weighted_geomean_ratio", 0.0)
                           - (champ_before.get("eval", {}) or {}).get("weighted_geomean_ratio", 0.0))
                 outcome = self._levers.classify_outcome(improved, correct, dF)
-                self._levers.record_outcome(rec.lever_id, outcome, step=rec.step)
+                # Adoption-aware exhaustion: for a foundation lever (wgmma/TMA/fp8), tell the ledger
+                # whether its instruction class actually landed in the SASS.  A "selected but never
+                # emitted" step (the brain substituted an easier path) must NOT exhaust the capability
+                # the way TMA was -- record_outcome treats adopted=False as not-implemented, not as a
+                # technique failure.  adopted stays None when there's no verify signal / no readable SASS.
+                adopted = None
+                lv = levers.lever_by_id(rec.lever_id)
+                if lv is not None and lv.verify:
+                    if _sass_has(rec.sass_hot, lv.verify) or _sass_has(rec.sass, lv.verify):
+                        adopted = True
+                    elif ((isinstance(rec.sass_hot, dict) and rec.sass_hot.get("ok"))
+                          or (isinstance(rec.sass, dict) and rec.sass.get("ok"))):
+                        adopted = False     # SASS readable and the instruction class is absent
+                self._levers.record_outcome(rec.lever_id, outcome, step=rec.step, adopted=adopted)
                 self._memory.set_lever_ledger(self._levers.ledger_summary())
             lesson, _ = self._causal_lesson(rec, champ_before, improved)
             self._memory.add_lesson(lesson)
@@ -983,6 +1063,47 @@ class Orchestrator:
             "outcome": "rewrite branch opened (branch-local acceptance; deferred adopt-or-revert)",
             "cause": "trunk structural levers exhausted", "promoted": False})
         self._init_branch_journal(b, reasons)
+        self._memory.commit()
+
+    def _capability_branch_target(self, rec: StepRecord) -> Optional[str]:
+        """Layer 4 trigger: if this trunk step just FAILED to land an all-or-nothing capability, return
+        the lever id to fund through a dedicated branch -- else None.
+
+        Fires only when (a) the step's lever is a `branch_dev` rewrite (tma-load / persistent / cluster
+        multicast), (b) its instruction class is STILL absent from the built SASS, and (c) the trunk has
+        already spent its in-step budget on it (the lever is exhausted -- i.e. NOT_IMPL_CAP in-step
+        completion-gate attempts failed).  At that point the single-step trunk can't add it, so escalate
+        to a multi-step, branch-local-acceptance rewrite instead of leaving it permanently absent."""
+        lid = rec.lever_id
+        if not lid or not levers.is_branch_dev(lid):
+            return None
+        lv = levers.lever_by_id(lid)
+        if lv and lv.verify and (_sass_has(rec.sass_hot, lv.verify) or _sass_has(rec.sass, lv.verify)):
+            return None    # capability actually present -> nothing to fund
+        if not self._levers.is_exhausted(lid):
+            return None    # trunk still has in-step budget to try it -> don't escalate yet
+        return lid
+
+    def _open_capability_branch(self, best: Optional[dict], lever_id: str):
+        """Open a CAPABILITY rewrite branch (Layer 4): seeded from the CHAMPION (we ADD the capability
+        to the best kernel, not restructure from the knee), focused on one all-or-nothing lever, with
+        branch-local acceptance over BRANCH_BUDGET steps then adopt-or-revert."""
+        anchor_cid = best.get("cid") if best else None
+        anchor_F = (best.get("eval", {}) or {}).get("weighted_geomean_ratio") if best else None
+        seed_cid = anchor_cid or self._resolve_branch_seed(best)
+        lv = levers.lever_by_id(lever_id)
+        b = self._plateau.open_branch(anchor_cid, anchor_F, seed_cid,
+                                      budget=C.BRANCH_BUDGET, focus_lever=lever_id)
+        self._log(f"[branch] CAPABILITY-FUND '{lever_id}' (trunk could not land {lv.verify if lv else '?'} "
+                  f"in-step) -> champion-seeded branch from {seed_cid}, budget={b['budget']}")
+        self._memory.add_lesson({
+            "step": -1, "cid": seed_cid, "change": f"[branch OPEN: capability {lever_id}]",
+            "hypothesis": f"trunk repeatedly failed to land {lever_id} ({lv.verify if lv else '?'}) "
+                          "in a single step; fund it over multiple steps with branch-local acceptance",
+            "outcome": "capability rewrite branch opened (regressions tolerated; must stay correct)",
+            "cause": "all-or-nothing structural change rejected by the single-step promotion bar",
+            "promoted": False})
+        self._init_branch_journal(b, [f"capability:{lever_id}"])
         self._memory.commit()
 
     def _branch_gate_tip(self, so_path: Optional[str], cid: str) -> bool:
@@ -1208,9 +1329,11 @@ class Orchestrator:
                 self._update_branch_journal(rec, self._plateau.branch or bm, became_tip)
                 self._persist_step(rec)
                 # D1: if nothing has been correct after a few branch steps, the knee substrate is
-                # blocking the rewrite -> escalate to the from-scratch seed.
+                # blocking the rewrite -> escalate to the from-scratch seed.  NOT for a capability
+                # branch: it is champion-seeded to ADD one feature, so a bare-seed restart would throw
+                # away the champion's gains -- let it ride its budget on the champion substrate.
                 b = self._plateau.branch or {}
-                if (b.get("tip_F") is None and not b.get("escalated")
+                if (not b.get("focus_lever") and b.get("tip_F") is None and not b.get("escalated")
                         and b.get("steps_used", 0) >= C.BRANCH_ESCALATE_AFTER
                         and b.get("seed_cid") != "step000"):
                     self._plateau.escalate_to_seed("step000")
@@ -1319,14 +1442,20 @@ class Orchestrator:
                     self._supervisor_note = ("You have not improved in several rounds. Step back, "
                         "review the profiler bottleneck, and try a DIFFERENT subsystem/approach this round.")
 
-            # C2: STUCK? open a protected rewrite branch (score-plateau OR structural-lever stall OR
-            # >=3 consecutive non-promotions) seeded from the pre-plateau knee.
+            # C2/Layer 4: open a protected rewrite branch when stuck.  PRIORITY: if the trunk just
+            # gave up on an all-or-nothing capability (e.g. tma-load exhausted its in-step budget with
+            # TMA still absent), fund THAT capability in a champion-seeded branch; otherwise fall back
+            # to the generic restructure-from-knee branch (score-plateau / structural-stall / rejects).
             if (C.ENABLE_REWRITE_BRANCH and not improved and best is not None
                     and not self._plateau.branch_active()):
-                recent_struct = self._levers.recent_structural_outcomes(C.STUCK_STRUCTURAL_STALL)
-                reasons = self._plateau.stuck_reasons(recent_struct)
-                if reasons:
-                    self._open_branch(best, reasons)
+                cap_lever = self._capability_branch_target(rec)
+                if cap_lever:
+                    self._open_capability_branch(best, cap_lever)
+                else:
+                    recent_struct = self._levers.recent_structural_outcomes(C.STUCK_STRUCTURAL_STALL)
+                    reasons = self._plateau.stuck_reasons(recent_struct)
+                    if reasons:
+                        self._open_branch(best, reasons)
 
             term = self._maybe_terminate(rec, step)
             if term is not None:

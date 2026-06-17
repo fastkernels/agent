@@ -173,6 +173,41 @@ def _instr_mix_from_cubin(cubin_path: str) -> dict:
     return agg
 
 
+# PTX lines worth quoting back to the brain: the Hopper async-copy + warpgroup-MMA primitives and
+# their supporting shared/barrier declarations.  This is the literal instruction SEQUENCE an ideal
+# kernel issues -- far more actionable than a count, since it shows the FORMS and their ORDER.
+_PTX_REF_KEYS = ("mbarrier.", "cp.async.bulk", "tensormap", "wgmma.", ".fence", "expect_tx",
+                 "barrier.cluster", "elect.sync", "setmaxnreg", "ldmatrix", "stmatrix", "fence.proxy")
+
+
+def _slice_ptx_reference(ptx_path: Optional[str], max_lines: int = 40) -> str:
+    """Slice the TMA / mbarrier / wgmma instruction sequence out of the oracle PTX.
+
+    Returns a compact, literal reference (instruction forms + their order, plus the shared-mem /
+    entry declarations that frame them) the brain can MIRROR in its own kernel -- never #included,
+    only read.  '' when the file is unreadable or carries no Hopper primitives (so callers can skip
+    the section instead of injecting noise)."""
+    try:
+        with open(ptx_path) as fh:                          # type: ignore[arg-type]
+            lines = fh.read().splitlines()
+    except Exception:  # noqa: BLE001
+        return ""
+    keep: list[str] = []
+    for ln in lines:
+        s = ln.strip()
+        if not s or s.startswith("//"):
+            continue
+        if s.startswith((".shared", ".visible .entry")) or any(k in s for k in _PTX_REF_KEYS):
+            keep.append(s[:200])
+    out: list[str] = []
+    for s in keep:                                          # drop consecutive duplicates
+        if not out or out[-1] != s:
+            out.append(s)
+    if not any(("wgmma." in s) or ("cp.async.bulk" in s) for s in out):
+        return ""                                           # no real Hopper primitive -> useless ref
+    return "\n".join(out[:max_lines])
+
+
 def _hints_from_mix(mix: dict, tier: str, cfg) -> list[str]:
     """Distilled, bounded hints derived from the oracle instruction mix + known FA3 facts."""
     hints: list[str] = []
@@ -224,18 +259,23 @@ def _try_cutedsl(cfg, work_dir: str) -> Optional[dict]:
     rc, log = _run([sys.executable, drv], CUTEDSL_TIMEOUT_S, cwd=work_dir, env=env)
     if rc != 0 or "CUTEDSL_OK" not in log:
         return {"_failed": True, "_log": log.strip().splitlines()[-3:]}
-    cubin = None
+    cubin = ptx = None
     for line in log.splitlines():
         if line.startswith("CUTEDSL_OK"):
             parts = line.split()
             if len(parts) >= 2:
                 cubin = parts[1]
+            if len(parts) >= 3 and parts[2]:
+                ptx = parts[2]
     if not cubin or not os.path.exists(cubin):
         cubins = glob.glob(os.path.join(work_dir, "*.cubin"))
         cubin = cubins[0] if cubins else None
     if not cubin:
         return {"_failed": True, "_log": ["no cubin produced"]}
-    return {"cubin_path": cubin}
+    if not ptx or not os.path.exists(ptx):
+        ptxs = glob.glob(os.path.join(work_dir, "*.ptx"))
+        ptx = ptxs[0] if ptxs else None
+    return {"cubin_path": cubin, "ptx_path": ptx}
 
 
 def _try_nvcc_wgmma(cfg, work_dir: str) -> Optional[dict]:
@@ -245,13 +285,16 @@ def _try_nvcc_wgmma(cfg, work_dir: str) -> Optional[dict]:
     n_tile = 128 if hd >= 128 else (64 if hd >= 64 else 64)
     cu = os.path.join(work_dir, "wgmma_oracle.cu")
     cubin = os.path.join(work_dir, "wgmma_oracle.cubin")
+    ptx = os.path.join(work_dir, "wgmma_oracle.ptx")
     with open(cu, "w") as f:
         f.write(_wgmma_snippet(n_tile))
     rc, log = _run([NVCC, "-arch=" + GENCODE_ARCH, "-O3", "-cubin", "-o", cubin, cu],
                    NVCC_TIMEOUT_S)
     if rc != 0 or not os.path.exists(cubin):
         return {"_failed": True, "_log": log.strip().splitlines()[-4:]}
-    return {"cubin_path": cubin}
+    # also emit human-readable PTX (best-effort) so build_oracle can slice the literal sequence.
+    _run([NVCC, "-arch=" + GENCODE_ARCH, "-O3", "-ptx", "-o", ptx, cu], NVCC_TIMEOUT_S)
+    return {"cubin_path": cubin, "ptx_path": (ptx if os.path.exists(ptx) else None)}
 
 
 @logged("cutlass_oracle")
@@ -285,10 +328,10 @@ def build_oracle(cfg, work_dir: str) -> dict:
         # reference, but a real wgmma oracle is more useful -> fall through when absent.
         if mix.get("HGMMA", 0) + mix.get("QGMMA", 0) + mix.get("IGMMA", 0) > 0:
             return _finish("cutedsl", cubin, mix, cfg, tier_log,
-                           "CuTeDSL bf16 GEMM compiled; wgmma present.")
+                           "CuTeDSL bf16 GEMM compiled; wgmma present.", res.get("ptx_path"))
         tier_log["cutedsl"] = "compiled but no wgmma in SASS (scalar GEMM); fell through"
         # keep the cubin around as a PTX reference but prefer the wgmma tier
-        cutedsl_fallback = (cubin, mix)
+        cutedsl_fallback = (cubin, mix, res.get("ptx_path"))
     else:
         tier_log["cutedsl"] = "failed: " + "; ".join(res.get("_log", [])) if res else "failed"
         cutedsl_fallback = None
@@ -300,43 +343,48 @@ def build_oracle(cfg, work_dir: str) -> dict:
         mix = _instr_mix_from_cubin(cubin)
         if mix.get("HGMMA", 0) + mix.get("QGMMA", 0) > 0:
             return _finish("wgmma_nvcc", cubin, mix, cfg, tier_log,
-                           "inline wgmma+TMA probe compiled; HGMMA/UTMALDG present.")
+                           "inline wgmma+TMA probe compiled; HGMMA/UTMALDG present.",
+                           res.get("ptx_path"))
         tier_log["wgmma_nvcc"] = "compiled but no HGMMA found in SASS"
     else:
         tier_log["wgmma_nvcc"] = "failed: " + "; ".join(res.get("_log", [])) if res else "failed"
 
     # If CuTeDSL produced *something* (scalar), use it as a PTX reference before baseline.
     if cutedsl_fallback is not None:
-        cubin, mix = cutedsl_fallback
+        cubin, mix, ptx_path = cutedsl_fallback
         return _finish("cutedsl", cubin, mix, cfg, tier_log,
-                       "CuTeDSL GEMM (scalar, no wgmma) used as PTX reference.")
+                       "CuTeDSL GEMM (scalar, no wgmma) used as PTX reference.", ptx_path)
 
     # ---- Tier 3: baseline .so (last resort) ------------------------------------------
     base = config.BASELINE_SO
     if os.path.exists(base):
         mix = _instr_mix_from_cubin(base)
         return _finish("baseline", base, mix, cfg, tier_log,
-                       "degraded: using prebuilt baseline _vllm_fa3_C .so as oracle.")
+                       "degraded: using prebuilt baseline _vllm_fa3_C .so as oracle.", None)
 
     return {
         "oracle": "none",
         "cubin_path": None,
         "instr_mix": {},
         "hints": ["oracle build failed at every tier; no Hopper reference available"],
+        "ptx_ref": "",
         "note": f"all tiers failed in {time.time() - t0:.1f}s",
         "tier_log": tier_log,
     }
 
 
-def _finish(tier: str, cubin: str, mix: dict, cfg, tier_log: dict, note: str) -> dict:
+def _finish(tier: str, cubin: str, mix: dict, cfg, tier_log: dict, note: str,
+            ptx_path: Optional[str] = None) -> dict:
     key = ["HGMMA", "QGMMA", "IGMMA", "UTMALDG", "UBLKCP", "LDGSTS", "LDSM_STSM",
            "HMMA", "FFMA", "MUFU", "LDG", "STG", "LDL_SPILL", "STL_SPILL"]
     slim = {k: mix[k] for k in key if mix.get(k)}
     return {
         "oracle": tier,
         "cubin_path": cubin,
+        "ptx_path": ptx_path,
         "instr_mix": slim,
         "hints": _hints_from_mix(mix, tier, cfg),
+        "ptx_ref": _slice_ptx_reference(ptx_path),
         "note": note,
         "tier_log": tier_log,
     }

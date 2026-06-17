@@ -97,6 +97,71 @@ def last_completed_step(run_id: str) -> Optional[int]:
     return max(s.get("step", -1) for s in steps)
 
 
+def purge_incomplete_tail(run_id: str, log: Callable = print) -> dict:
+    """Before a plain resume, DELETE the leftover on-disk artifacts of the not-yet-completed step.
+
+    A resume re-runs step ``start = last_completed_step + 1``.  If a prior attempt at that step was
+    started but killed before it was persisted to candidates.jsonl (interrupted mid-build / mid-eval),
+    its workdir artifacts are stale and MUST go before the step re-runs -- most importantly the torch
+    ``FileBaton`` ``lock`` left under ``builds/stepNNN/``: the rebuild would otherwise wait forever on
+    a lock no live process holds and hang the whole run.  Cleared (disk-driven, so orphans too):
+
+      * ``builds/stepNNN/`` for NNN >= start (the stale build tree incl. the FileBaton ``lock``);
+      * ``candidates/stepNNN.cu`` for NNN >= start (the half-written candidate source);
+      * the ``run.log`` tail from the first ``=== STEP {start}`` banner on (the killed attempt's logs);
+      * ``knowledge/*.md`` notes authored for step >= start.
+
+    Unlike a rollback this DELETES outright (no archive copy) and does NOT touch the cross-step state
+    (lever / branch / memory / best.cu): those are only updated once a step is PERSISTED, so as of step
+    ``start-1`` they are already correct and the discarded attempt never mutated them.  No-op when the
+    tail is already clean (a fresh run, or a cold resume restored from the archive)."""
+    work = checkpoint.paths(run_id)["run"]
+    if not os.path.isdir(work):
+        return {"purged": 0, "start": None}
+    last = last_completed_step(run_id)
+    start = 0 if last is None else last + 1
+    N = start - 1                       # keep step <= N; purge step >= start
+    discard = lambda rel: _purge(work, rel, log)  # noqa: E731
+
+    nb = _sweep_step_artifacts(work, "builds", N, discard)
+    nc = _sweep_step_artifacts(work, "candidates", N, discard)
+
+    # run.log: drop the tail from the first step>=start banner (the killed attempt's logs).
+    nlog = 0
+    runlog = os.path.join(work, "run.log")
+    if os.path.exists(runlog):
+        with open(runlog, encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+        cut = None
+        for i, ln in enumerate(lines):
+            m = _STEP_LINE_RE.search(ln)
+            if m and int(m.group(1)) > N:
+                cut = i
+                break
+        if cut is not None:
+            nlog = len(lines) - cut
+            with open(runlog, "w", encoding="utf-8", errors="replace") as fh:
+                fh.writelines(lines[:cut])
+                fh.write(f"[resume] --- discarded the incomplete step {start} attempt "
+                         f"(stale build/lock/candidate/log) before re-running it ---\n")
+
+    # knowledge notes authored for step >= start.
+    nk = 0
+    kdir = os.path.join(work, "knowledge")
+    if os.path.isdir(kdir):
+        for fn in list(os.listdir(kdir)):
+            if not fn.endswith(".md"):
+                continue
+            st = _note_step(os.path.join(kdir, fn))
+            if st is not None and st > N:
+                nk += bool(_purge(work, os.path.join("knowledge", fn), log))
+
+    if nb or nc or nk or nlog:
+        log(f"[resume] purged incomplete step {start} tail: {nb} build dir(s), {nc} candidate(s), "
+            f"{nk} knowledge note(s){', run.log tail' if nlog else ''} (deleted, not archived)")
+    return {"purged": nb + nc + nk, "start": start, "runlog_lines": nlog}
+
+
 def plan(run_id: str, from_step: int) -> dict:
     """CLI-shaped summary of what a rollback to `from_step` discards (no side effects)."""
     cp = compute_plan(checkpoint.load_steps(run_id), from_step)
@@ -251,6 +316,22 @@ def _evict(base: str, rel: str, sink: str, log: Callable) -> bool:
     return True
 
 
+def _purge(base: str, rel: str, log: Callable) -> bool:
+    """DELETE base/rel outright (no archive copy).  Used by the resume-time tail cleanup, which
+    discards the leftovers of a never-persisted step instead of preserving them like a rollback."""
+    src = os.path.join(base, rel)
+    if not os.path.exists(src):
+        return False
+    try:
+        if os.path.isdir(src):
+            shutil.rmtree(src, ignore_errors=True)
+        else:
+            os.remove(src)
+    except OSError as e:
+        log(f"[resume]   WARN could not delete {rel}: {e!r}")
+    return True
+
+
 _STEP_ARTIFACT_RE = re.compile(r"^step(\d+)(?:\.\w+)?$")
 
 
@@ -303,6 +384,13 @@ def _rebuild_lever_state(history: list, target_step: int) -> dict:
             outcome = h[3] if len(h) > 3 else None
             if outcome:
                 lc.record_outcome(lid, outcome, step=step)
+        # A rollback discards the later trajectory that "exhausted" a prerequisite capability
+        # (wgmma / TMA / fp8-wgmma).  Re-open those foundation levers so the resumed run can attempt
+        # the structural change again instead of inheriting a permanent lock-out from the rolled-back
+        # steps.  Tactic levers keep their replayed state.
+        reopened = lc.reset_exhaustion(foundation_only=True)
+        if reopened:
+            lc.state.setdefault("_rollback_reopened", reopened)
         return lc.state
     finally:
         shutil.rmtree(tmpd, ignore_errors=True)

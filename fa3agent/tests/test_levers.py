@@ -45,8 +45,8 @@ def main() -> int:
             "off-tensor-core": "wgmma-tensorcore",
             "overlap-bound": "warp-specialize",
             "register-spill": "setmaxnreg-split-registers",
-            "latency-bound": "tma-multistage-pipeline",
-            "dram-bandwidth-bound": "tma-multistage-pipeline",
+            "latency-bound": "tma-load",
+            "dram-bandwidth-bound": "tma-load",
             "occupancy-bound": "decode-splitkv",
             "sync-bound": "warp-specialize",
         }
@@ -147,8 +147,8 @@ def main() -> int:
         cases = [
             # (label, uses_tma, uses_wgmma) -> expected lever
             (("off-tensor-core", False, False), "wgmma-tensorcore"),   # no wgmma -> land wgmma first
-            (("overlap-bound", False, True), "tma-multistage-pipeline"),  # wgmma but no TMA -> TMA
-            (("off-tensor-core", False, True), "tma-multistage-pipeline"),
+            (("overlap-bound", False, True), "tma-load"),              # wgmma but no TMA -> TMA load
+            (("off-tensor-core", False, True), "tma-load"),
             (("overlap-bound", True, True), "warp-specialize"),        # foundation present -> warp-spec
             (("overlap-bound", None, None), "warp-specialize"),        # unknown SASS -> gate skipped
         ]
@@ -166,7 +166,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         c = LeverController(d)
         for _ in range(L.LEVER_MAX_FAILS):
-            c.record_outcome("tma-multistage-pipeline", "failed", step=0)
+            c.record_outcome("tma-load", "failed", step=0, adopted=True)   # genuine perf-fail with TMA present
         got = c.select("overlap-bound", 1, uses_tma=False, uses_wgmma=True).id
         if got == "warp-specialize":
             _ok("exhausted TMA foundation -> falls through to warp-specialize")
@@ -232,7 +232,7 @@ def main() -> int:
     from fa3agent.orchestrator import _sass_has
     # the three foundation levers carry their adoption signal; nothing else does
     want_verify = {"wgmma-tensorcore": "uses_wgmma",
-                   "tma-multistage-pipeline": "uses_tma",
+                   "tma-load": "uses_tma",
                    "fp8-wgmma-promote": "uses_fp8_wgmma"}
     got_verify = {lv.id: lv.verify for lv in L.CATALOG if lv.verify}
     labels_ok = all(sig in L.VERIFY_LABELS for sig in want_verify.values())
@@ -256,6 +256,114 @@ def main() -> int:
     else:
         failures += _fail(f"verify={got_verify} labels_ok={labels_ok} sass_ok={sass_ok} "
                           f"trigger_ok={trigger_ok}")
+
+    # ---- (11) adoption-aware exhaustion: a NOT-implemented foundation lever is not locked out ----
+    print(f"[11] foundation lever with capability ABSENT survives {L.LEVER_MAX_FAILS} perf-misses; "
+          f"exhausts only after {L.LEVER_NOT_IMPL_CAP} non-implementations")
+    with tempfile.TemporaryDirectory() as d:
+        c = LeverController(d)
+        lid = "tma-load"                     # verify=uses_tma
+        # brain substituted an easier path: perf "no_effect" but TMA never emitted (adopted=False)
+        for _ in range(L.LEVER_MAX_FAILS):
+            c.record_outcome(lid, "no_effect", step=0, adopted=False)
+        survived = not c.is_exhausted(lid)
+        # keep going to the not-implemented cap -> now it gives up
+        for _ in range(L.LEVER_NOT_IMPL_CAP - L.LEVER_MAX_FAILS):
+            c.record_outcome(lid, "no_effect", step=0, adopted=False)
+        exhausted_after_cap = c.is_exhausted(lid)
+        e = c.state["levers"][lid]
+        if (survived and exhausted_after_cap and e.get("not_impl") == L.LEVER_NOT_IMPL_CAP
+                and e.get("fail_streak") == 0):
+            _ok(f"absent-capability misses tracked as not_impl (={e['not_impl']}); "
+                f"fail_streak untouched; exhausts at the cap")
+        else:
+            failures += _fail(f"survived={survived} exhausted_after_cap={exhausted_after_cap} "
+                              f"entry={e}")
+
+    # ---- (11b) adopted=True -> the technique got a fair test, normal exhaustion applies ----
+    print("[11b] foundation lever with capability PRESENT exhausts on the normal fail streak")
+    with tempfile.TemporaryDirectory() as d:
+        c = LeverController(d)
+        lid = "wgmma-tensorcore"             # verify=uses_wgmma
+        for _ in range(L.LEVER_MAX_FAILS):
+            c.record_outcome(lid, "no_effect", step=0, adopted=True)
+        e = c.state["levers"][lid]
+        if c.is_exhausted(lid) and e.get("not_impl", 0) == 0 and e.get("no_effect") == L.LEVER_MAX_FAILS:
+            _ok("present-capability perf-misses use the normal fail streak -> exhausts as before")
+        else:
+            failures += _fail(f"expected normal exhaustion, entry={e} exhausted={c.is_exhausted(lid)}")
+
+    # ---- (11c) a real adoption (landed) resets the not-implemented streak ----
+    print("[11c] once the capability lands, the not-implemented streak resets")
+    with tempfile.TemporaryDirectory() as d:
+        c = LeverController(d)
+        lid = "tma-load"
+        c.record_outcome(lid, "no_effect", step=0, adopted=False)   # not implemented
+        c.record_outcome(lid, "landed", step=1, adopted=True)       # finally emitted + helped
+        if c.state["levers"][lid].get("not_impl_streak") == 0 and not c.is_exhausted(lid):
+            _ok("not_impl_streak reset by a genuine adoption")
+        else:
+            failures += _fail(f"streak not reset: {c.state['levers'][lid]}")
+
+    # ---- (12) reset_exhaustion reopens foundation levers only ----
+    print("[12] reset_exhaustion(foundation_only) reopens prerequisite levers, keeps tactics closed")
+    with tempfile.TemporaryDirectory() as d:
+        c = LeverController(d)
+        for _ in range(L.LEVER_NOT_IMPL_CAP):                       # exhaust a foundation lever
+            c.record_outcome("tma-load", "no_effect", step=0, adopted=False)
+        for _ in range(L.LEVER_MAX_FAILS):                          # exhaust a tactic lever
+            c.record_outcome("ping-pong-overlap", "no_effect", step=1)
+        reopened = c.reset_exhaustion(foundation_only=True)
+        if ("tma-load" in reopened
+                and not c.is_exhausted("tma-load")
+                and c.is_exhausted("ping-pong-overlap")):
+            _ok(f"reopened foundation levers {reopened}; tactic ping-pong-overlap stays exhausted")
+        else:
+            failures += _fail(f"reopened={reopened} tma_open={not c.is_exhausted('tma-load')} "
+                              f"pingpong_exhausted={c.is_exhausted('ping-pong-overlap')}")
+
+    # ---- (12b) the 'not_implemented' history tag replays correctly (rollback rebuild path) ----
+    print("[12b] a 'not_implemented' history entry replays without corrupting the ledger")
+    with tempfile.TemporaryDirectory() as d:
+        c = LeverController(d)
+        c.record_outcome("tma-load", "not_implemented", step=5)
+        e = c.state["levers"]["tma-load"]
+        if e.get("not_impl") == 1 and e.get("fail_streak") == 0 and e.get("not_implemented") is None:
+            _ok("replayed not_implemented tag -> not_impl counter (no bogus key, fail_streak intact)")
+        else:
+            failures += _fail(f"bad replay of not_implemented: {e}")
+
+    # ---- (13) Layer 3: tma-multistage split into a foundation + a tactic, old id aliased ----
+    print("[13] Layer 3: tma-load (foundation) + multistage-pipeline (tactic); old id aliases")
+    tma_load = L.lever_by_id("tma-load")
+    multistage = L.lever_by_id("multistage-pipeline")
+    aliased = L.lever_by_id("tma-multistage-pipeline")     # retired id -> resolves to tma-load
+    ok13 = (tma_load is not None and tma_load.verify == "uses_tma" and tma_load.kind == L.STRUCTURAL
+            and multistage is not None and multistage.verify == "" and multistage.kind == L.STRUCTURAL
+            and L.lever_by_id("tma-multistage-pipeline") is tma_load     # alias resolution
+            and aliased is tma_load
+            and tma_load.rung < multistage.rung)               # foundation preferred before the ring
+    if ok13:
+        _ok("tma-load is the gated foundation; multistage-pipeline is a no-verify tactic; alias OK")
+    else:
+        failures += _fail(f"split wrong: tma_load={tma_load and (tma_load.verify, tma_load.kind)} "
+                          f"multistage={multistage and (multistage.verify, multistage.kind)} "
+                          f"alias={aliased and aliased.id}")
+
+    # ---- (14) Layer 4: all-or-nothing levers tagged branch_dev (and only the right ones) ----
+    print("[14] Layer 4: branch_dev tags the all-or-nothing rewrites only")
+    want_branch_dev = {"tma-load", "persistent-l2-scheduling", "clusters-tma-multicast"}
+    got_branch_dev = {lv.id for lv in L.CATALOG if lv.branch_dev}
+    not_dev = {"multistage-pipeline", "warp-specialize", "softmax-log2", "wgmma-tensorcore",
+               "faster-barriers"}
+    ok14 = (got_branch_dev == want_branch_dev
+            and all(L.is_branch_dev(i) for i in want_branch_dev)
+            and not any(L.is_branch_dev(i) for i in not_dev)
+            and L.is_branch_dev("tma-multistage-pipeline"))    # alias -> tma-load (branch_dev)
+    if ok14:
+        _ok(f"branch_dev == {sorted(got_branch_dev)}; is_branch_dev() correct incl. alias")
+    else:
+        failures += _fail(f"branch_dev wrong: got={got_branch_dev} want={want_branch_dev}")
 
     # ---- (10) every lever has a reflib hints topic that resolves to a real topic ----
     print("[10] every lever's get_hints topic resolves (no hardcoded single topic)")

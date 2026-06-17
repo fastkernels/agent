@@ -219,6 +219,55 @@ def main() -> int:
         _ok("workdir purge: run.log truncated, best.cu + memory rolled back") if ok_state \
             else _fail("purge run.log/best.cu/memory wrong", fails)
 
+    # --- resume-time tail purge (purge_incomplete_tail): delete-only, state untouched -----------
+    # A plain resume re-runs start = last_completed+1.  If a prior attempt at that step was killed
+    # mid-build it leaves a stale build tree (incl. the torch FileBaton `lock` that would hang the
+    # rebuild) plus a half-written candidate / run.log tail / step knowledge -- all for steps that are
+    # NOT in candidates.jsonl.  These must be DELETED (no archive) while steps <= last and cross-step
+    # state stay put.
+    from fa3agent import config as C
+    saved_root = C.WORK_ROOT
+    with tempfile.TemporaryDirectory() as root:
+        C.WORK_ROOT = root
+        try:
+            rid = "run_purge"
+            work = os.path.join(root, rid)
+            for d in ("candidates", "builds", "knowledge"):
+                os.makedirs(os.path.join(work, d), exist_ok=True)
+            with open(os.path.join(work, "candidates.jsonl"), "w") as fh:  # steps 0,1,2 persisted
+                for s in (0, 1, 2):
+                    fh.write(json.dumps({"step": s, "cid": f"step{s:03d}", "is_best": s == 2}) + "\n")
+            for s in (0, 1, 2):
+                os.makedirs(os.path.join(work, "builds", f"step{s:03d}"), exist_ok=True)
+                open(os.path.join(work, "candidates", f"step{s:03d}.cu"), "w").write(f"// {s}\n")
+            # leftover incomplete step 3 (never persisted) + stray orphan step 4
+            os.makedirs(os.path.join(work, "builds", "step003"), exist_ok=True)
+            open(os.path.join(work, "builds", "step003", "lock"), "w").write("")     # FileBaton
+            open(os.path.join(work, "candidates", "step003.cu"), "w").write("// partial\n")
+            os.makedirs(os.path.join(work, "builds", "step004"), exist_ok=True)
+            open(os.path.join(work, "knowledge", "pf-tma.md"), "w").write("---\nstep: 3\n---\nx\n")
+            open(os.path.join(work, "knowledge", "pf-old.md"), "w").write("---\nstep: 1\n---\nkeep\n")
+            with open(os.path.join(work, "run.log"), "w") as fh:
+                fh.write("=== STEP 2 (step002) ===\nok\n=== STEP 3 (step003) ===\nbuild\nHANG\n")
+
+            res = RB.purge_incomplete_tail(rid, log=lambda m: None)
+            gone = (res["start"] == 3
+                    and not os.path.exists(os.path.join(work, "builds", "step003"))
+                    and not os.path.exists(os.path.join(work, "builds", "step004"))
+                    and not os.path.exists(os.path.join(work, "candidates", "step003.cu"))
+                    and not os.path.exists(os.path.join(work, "knowledge", "pf-tma.md")))
+            kept = (all(os.path.isdir(os.path.join(work, "builds", f"step{s:03d}")) for s in (0, 1, 2))
+                    and os.path.exists(os.path.join(work, "knowledge", "pf-old.md"))
+                    and [json.loads(l)["step"] for l in open(os.path.join(work, "candidates.jsonl"))
+                         if l.strip()] == [0, 1, 2])   # lineage (cross-step state) untouched
+            log = open(os.path.join(work, "run.log")).read()
+            log_ok = "=== STEP 3" not in log and "=== STEP 2" in log and "incomplete step 3" in log
+            (_ok("resume purge: step>=start (incl. FileBaton lock + orphan) deleted; <=last + state kept")
+             if (gone and kept and log_ok)
+             else _fail(f"resume purge gone={gone} kept={kept} log_ok={log_ok} res={res}", fails))
+        finally:
+            C.WORK_ROOT = saved_root
+
     print("\n" + ("ALL CHECKS PASSED" if not fails else f"{len(fails)} CHECK(S) FAILED"))
     return 0 if not fails else 1
 

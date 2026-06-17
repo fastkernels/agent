@@ -160,12 +160,31 @@ Then STOP. The driver will build + anti-cheat + verify correctness + profile and
 
 
 def completion_followup(candidate_path: str, focus: str, technique_label: str,
-                        gaps: list) -> str:
+                        gaps: list, ptx_ref: str = "") -> str:
     """In-step COMPLETION GATE follow-up: the brain just wrote `candidate_path` to INTRODUCE a new
     functionality, but the built kernel did not fully/correctly land it.  Hand it the precise gaps
     and tell it to FINISH the same file in place (not restart, not revert).  Used as a FRESH
-    session by default, so it must RE-READ the candidate -- the file on disk is the continuity."""
+    session by default, so it must RE-READ the candidate -- the file on disk is the continuity.
+
+    `ptx_ref` (optional): a literal Hopper PTX sequence from the out-of-band oracle (CUTLASS / inline
+    wgmma+TMA reference) for the exact instruction class that is still missing -- injected only when
+    the gate proved the class is absent, so the brain sees the concrete forms it must emit."""
     gap_block = "\n".join(f"  - {g}" for g in (gaps or [])) or "  - (unspecified)"
+    ref_block = ""
+    if ptx_ref:
+        ref_block = f"""
+REFERENCE — a WORKING Hopper kernel issuing {technique_label}, compiled out-of-band and disassembled
+to PTX. This is the exact instruction SEQUENCE (and ORDER) an ideal kernel emits. RE-DERIVE it in
+YOUR kernel (you may write this PTX via inline asm or the matching CUDA intrinsics) — do NOT #include
+cutlass/cute, and do NOT copy it verbatim into a dead path; the REAL, taken code path must issue it:
+```ptx
+{ptx_ref}
+```
+Mirror these forms: the mbarrier.init + mbarrier.arrive.expect_tx, the cp.async.bulk.tensor TMA load
+keyed off a CUtensorMap, the wgmma.fence.sync.aligned, the wgmma.mma_async.sync.aligned.m64nNk16
+MMA over shared-memory descriptors, then wgmma.commit_group + wgmma.wait_group. After you finish,
+SASS must show the instruction class present.
+"""
     return f"""\
 You just wrote a Hopper FlashAttention-3 candidate to {candidate_path} for this step's goal:
   {focus}
@@ -173,7 +192,7 @@ You just wrote a Hopper FlashAttention-3 candidate to {candidate_path} for this 
 The driver built and checked it, and the change is INCOMPLETE — it did not fully/correctly land
 the intended functionality. Concrete gaps found in the BUILT kernel:
 {gap_block}
-
+{ref_block}
 FINISH IT IN PLACE — do NOT start over and do NOT revert to the previous approach:
 1. READ the current {candidate_path} (it is the file you just wrote) so you continue YOUR work.
 2. Complete the implementation so that {technique_label} is ACTUALLY present in the compiled
