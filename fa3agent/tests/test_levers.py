@@ -47,7 +47,9 @@ def main() -> int:
             "register-spill": "setmaxnreg-split-registers",
             "latency-bound": "tma-load",
             "dram-bandwidth-bound": "tma-load",
-            "occupancy-bound": "decode-splitkv",
+            # occupancy-bound -> register reduction FIRST (rung 5) before split-K/persistent: a
+            # warp-starved (low-occupancy) tensor-core kernel is almost always register/smem-bound.
+            "occupancy-bound": "setmaxnreg-split-registers",
             "sync-bound": "warp-specialize",
         }
         bad = {bn: c.select(bn, 0).id for bn in cases if c.select(bn, 0).id != cases[bn]}

@@ -294,6 +294,14 @@ def _classify_perm_error(text: str) -> Optional[str]:
 
 
 # --- 4. bottleneck classification (decision tree from .research/ncu-skill.md) ---
+# Achieved-occupancy floor (%) below which a tensor-core kernel is WARP-STARVED rather than
+# overlap-bound: with too few resident warps the scoreboard stalls come from having nothing to
+# swap in, so warp-specialization / async overlap (which reschedule work ACROSS resident warps)
+# cannot help -- the lever is cutting registers/smem to fit more blocks per SM.  A 250-register
+# wgmma kernel pinned to ~1 block/SM lands at ~12% occupancy, well under this floor.
+_OCC_FLOOR = 25.0
+
+
 def _classify(action, uses_wgmma: Optional[bool] = None) -> tuple[str, str, str, str, list[str]]:
     """Return (label, bottleneck, optimization, plan, evidence_lines).
 
@@ -349,11 +357,35 @@ def _classify(action, uses_wgmma: Optional[bool] = None) -> tuple[str, str, str,
     if spill_ld or spill_st:
         ev.append(f"register spill: local ld {_fmt(spill_ld, 0)} / st {_fmt(spill_st, 0)}")
 
+    # A tensor-core kernel is WARP-STARVED when occupancy is critically low (few resident warps) or
+    # the grid is sub-wave -- the scoreboard stalls then come from warp starvation, not from a real
+    # overlap failure, so the prescription differs (cut registers/smem, not warp-specialize).
+    occ_starved = ((waves is not None and waves < 1.0) or (occ > 0.0 and occ < _OCC_FLOOR))
+
     # --- decision tree (ordered) ---
-    # overlap-bound FIRST (ranked above spill): the FA3-defining verdict -- the tensor cores ARE in
-    # use but stall behind long-latency dependencies (scoreboard/wait) and the pipe is far from
+    # Register/occupancy-STARVED tensor cores FIRST (ranked above overlap-bound and latency): wgmma
+    # IS present but the kernel runs far below the occupancy floor, so it stalls on the scoreboard
+    # for lack of warps to hide latency -- NOT because math/copy fail to overlap.  Warp-specialize /
+    # TMA-overlap can't help a ~1-block/SM kernel and only worsen its register pressure; the real
+    # lever is shrinking the per-thread register/smem footprint so >1 block fits per SM.
+    if (tensor_present and tensor < 50.0 and dram_pct < 60.0 and occ_starved
+            and (lsb + wait) > 30.0):
+        label = "occupancy-bound"
+        bn = (f"Register/occupancy-starved tensor cores: wgmma in use (pipe {_fmt(tensor, 2)}% "
+              f"active) but only {_fmt(occ)}% occupancy (waves/SM {_fmt(waves, 3)}) -> too few "
+              f"resident warps to hide latency, so {_fmt(lsb + wait)}% of cycles stall on the "
+              f"scoreboard/wait; SM SOL {_fmt(sm_sol)}%.")
+        opt = ("Raise occupancy by CUTTING per-thread registers/smem (the kernel is pinned to ~1 "
+               "block/SM): __launch_bounds__, shrink live register tiles / accumulator footprint, "
+               "move O to smem, free address-gen regs via TMA, or split-K -- BEFORE adding more "
+               "warp-specialization/overlap it has no register room for.")
+        plan = ("Cut the register/smem footprint (launch_bounds + smaller register tiles) so >1 "
+                "block fits per SM; recheck achieved occupancy rises and long-scoreboard stalls fall.")
+    # overlap-bound: the FA3-defining verdict -- tensor cores ARE in use AND occupancy is adequate,
+    # but the pipe stalls behind long-latency dependencies (scoreboard/wait) and is far from
     # saturated, i.e. the softmax/correction does NOT overlap the GEMMs -> warp-specialize.
-    if (tensor_present and tensor < 50.0 and dram_pct < 60.0 and (lsb + wait) > 40.0):
+    elif (tensor_present and tensor < 50.0 and dram_pct < 60.0 and (lsb + wait) > 40.0
+            and not occ_starved):
         label = "overlap-bound"
         bn = (f"Math/memory not overlapped: tensor cores in use (pipe {_fmt(tensor, 2)}% active, "
               f"uses_wgmma={uses_wgmma}) but stalled {_fmt(lsb + wait)}% on scoreboard/wait, "

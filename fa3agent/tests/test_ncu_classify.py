@@ -106,6 +106,28 @@ def main() -> int:
     else:
         failures += _fail(f"expected off-tensor-core (legacy), got {label}")
 
+    # (5) wgmma present + scoreboard stalls but WARP-STARVED (occ << floor, waves < 1) -> the stalls
+    #     come from too few resident warps, not an overlap failure: occupancy-bound, NOT overlap-bound.
+    #     (This is the real step-34/36 attn_prefill_wgmma kernel: 250 regs -> ~12.5% occ, ~1 block/SM.)
+    a = _Action(_base(tensor=13.0, fma=10.0, occ=12.5, waves=0.5,
+                      long_scoreboard=5.0, wait=3.0, short_scoreboard=0.5, barrier=0.5))
+    label, *_ = ncu_profile._classify(a, uses_wgmma=True)
+    print(f"[5] wgmma present + low occ (12.5%, <1 wave) -> {label}")
+    if label == "occupancy-bound":
+        _ok("warp-starved tensor-core kernel -> occupancy-bound (not overlap-bound)")
+    else:
+        failures += _fail(f"expected occupancy-bound for a starved wgmma kernel, got {label}")
+
+    # (6) same stalls but ADEQUATE occupancy -> a genuine overlap problem stays overlap-bound
+    a = _Action(_base(tensor=13.0, fma=10.0, occ=45.0, waves=2.0,
+                      long_scoreboard=5.0, wait=3.0, short_scoreboard=0.5, barrier=0.5))
+    label, *_ = ncu_profile._classify(a, uses_wgmma=True)
+    print(f"[6] wgmma present + adequate occ (45%) -> {label}")
+    if label == "overlap-bound":
+        _ok("adequately-occupied stalled wgmma kernel stays overlap-bound")
+    else:
+        failures += _fail(f"expected overlap-bound at adequate occupancy, got {label}")
+
     print()
     if failures == 0:
         print("SMOKE: PASS (B2 classify)")

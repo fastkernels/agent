@@ -153,15 +153,20 @@ CATALOG: list = [
         success="tensor-pipe %active stays high while MUFU/transcendental runs; SM SOL rises",
         rung=5),
     Lever(
+        # Fires on register-spill AND on a register/occupancy-starved tensor-core kernel (the
+        # occupancy-bound verdict for a ~1-block/SM wgmma kernel): in both cases the fix is a smaller
+        # per-thread register/smem footprint -- to kill spills, or to fit >1 block/SM and lift
+        # occupancy.  Lowest-rung occupancy-bound lever, so it is tried before split-K / persistent.
         id="setmaxnreg-split-registers",
-        bottlenecks=("register-spill",),
-        focus=("Cut register pressure so spills vanish: add __launch_bounds__, split consumer "
-               "warpgroups with setmaxnreg, shrink live register tiles / per-thread accumulator "
-               "footprint, move O out of registers into shared memory if needed."),
+        bottlenecks=("register-spill", "occupancy-bound"),
+        focus=("Cut register/smem pressure so more blocks fit per SM (raise occupancy) and spills "
+               "vanish: add __launch_bounds__, split consumer warpgroups with setmaxnreg, shrink "
+               "live register tiles / per-thread accumulator footprint, move O out of registers "
+               "into shared memory if needed."),
         doc_sections=[("kernel-patterns.md", "Occupancy tuning"),
                       ("kernel-patterns.md", "Warp specialization")],
         kind=STRUCTURAL,
-        success="local ld/st (spill) instructions == 0",
+        success="achieved occupancy rises (more blocks resident/SM) and local ld/st spills == 0",
         rung=5),
     Lever(
         id="softmax-log2",
